@@ -172,9 +172,7 @@ function Parse-WingetUpgradeList {
         $l = [string]$raw
         if ([string]::IsNullOrWhiteSpace($l)) { continue }
 
-        if ($l -match '^\s*Name\b') { continue }
-        if ($l -match '^\s*-+\s*$') { continue }
-        if ($l -match '^\s*\d+\s+upgrades?\b') { continue }
+        if ($l -match '^\s*(Name|---|\d+\s+upgrades?)\b') { continue }
         if ($l -match 'No installed package') { continue }
         if ($l -match 'require explicit targeting') { continue }
 
@@ -191,7 +189,7 @@ function Parse-WingetUpgradeList {
         }
     }
 
-    return $items.ToArray()
+    return @($items)
 }
 
 function Get-WingetExplicitTargetIds {
@@ -206,11 +204,8 @@ function Get-WingetExplicitTargetIds {
         if ($l -match 'require explicit targeting') { $inTable = $true; continue }
         if (-not $inTable) { continue }
         if ($l -match '^\s*Name\s+Id\s+Version') { continue }
-        if ($l -match '^\s*-+\s*$') { continue }
-        if ([string]::IsNullOrWhiteSpace($l)) {
-            # Skip blank lines before table or between sections.
-            continue
-        }
+        if ($l -match '^\s*-{3,}') { continue }
+        if ([string]::IsNullOrWhiteSpace($l)) { break }
 
         $parts = @($l -split '\s{2,}' | Where-Object { $_ -ne "" })
         if ($parts.Count -ge 2) { $ids.Add($parts[1]) | Out-Null }
@@ -273,9 +268,11 @@ function Get-PythonTargets {
             if (Test-CommandExists $name) {
                 try {
                     & $name --version *> $null
-                    $targets.Add($name) | Out-Null
+                    if ($LASTEXITCODE -eq 0) {
+                        $targets.Add($name) | Out-Null
+                    }
                 } catch {
-                    Write-Log "Interpreter '$name' w PATH nie działa (alias/launcher). Pomijam." "WARN"
+                    # Ignorujemy błędy uruchamiania (np. alias do Store, brak faktycznego pliku)
                 }
             }
         }
@@ -397,7 +394,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     $upgradeArgs = @(
         "upgrade","--all",
         "--accept-source-agreements","--accept-package-agreements",
-        "--disable-interactivity","--verbose-logs","-o",$wingetAllLog
+        "--disable-interactivity","--verbose-logs"
     )
     if ($IncludeUnknown) { $upgradeArgs += "--include-unknown" }
     if ($Force)          { $upgradeArgs += "--force" }
@@ -409,14 +406,14 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     }
 
     Write-Log "winget $($upgradeArgs -join ' ')"
-    $ecAll = Try-Run -Body { winget @upgradeArgs } -OutputLines ([ref]$lines)
+    $ecAll = Try-Run -Body { winget @upgradeArgs 2>&1 | Tee-Object -FilePath $wingetAllLog } -OutputLines ([ref]$lines)
     $r.ExitCode = $ecAll
     @($lines) | ForEach-Object { Write-Log $_ }
 
     if ($ecAll -ne 0) {
         try {
             Write-Log "winget error $ecAll (dekodowanie):"
-            @((winget error $ecAll) 2>&1) | ForEach-Object { Write-Log $_ } | Out-Null
+            @((winget error --input "$ecAll") 2>&1) | ForEach-Object { Write-Log $_ } | Out-Null
         } catch {}
     }
 
@@ -443,11 +440,6 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         )
         if ($Force) { $args += "--force" }
 
-        if ($WhatIf) {
-            $r.Actions.Add("[WHATIF] EXPLICIT: winget $($args -join ' ')")
-            continue
-        }
-
         Write-Log "EXPLICIT: winget $($args -join ' ')"
         $outX = @(& winget @args 2>&1)
         $ecX  = $LASTEXITCODE
@@ -473,11 +465,6 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
             "--disable-interactivity","--verbose-logs","-o",$retryLog
         )
         if ($Force) { $retryArgs += "--force" }
-
-        if ($WhatIf) {
-            $r.Actions.Add("[WHATIF] RETRY: winget $($retryArgs -join ' ')")
-            continue
-        }
 
         Write-Log "RETRY: winget $($retryArgs -join ' ')"
         $outR = @(& winget @retryArgs 2>&1)
