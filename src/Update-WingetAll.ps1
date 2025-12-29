@@ -172,7 +172,9 @@ function Parse-WingetUpgradeList {
         $l = [string]$raw
         if ([string]::IsNullOrWhiteSpace($l)) { continue }
 
-        if ($l -match '^\s*(Name|---|\d+\s+upgrades?)\b') { continue }
+        if ($l -match '^\s*Name\b') { continue }
+        if ($l -match '^\s*-+\s*$') { continue }
+        if ($l -match '^\s*\d+\s+upgrades?\b') { continue }
         if ($l -match 'No installed package') { continue }
         if ($l -match 'require explicit targeting') { continue }
 
@@ -189,7 +191,7 @@ function Parse-WingetUpgradeList {
         }
     }
 
-    return @($items)
+    return $items.ToArray()
 }
 
 function Get-WingetExplicitTargetIds {
@@ -204,8 +206,11 @@ function Get-WingetExplicitTargetIds {
         if ($l -match 'require explicit targeting') { $inTable = $true; continue }
         if (-not $inTable) { continue }
         if ($l -match '^\s*Name\s+Id\s+Version') { continue }
-        if ($l -match '^\s*-{3,}') { continue }
-        if ([string]::IsNullOrWhiteSpace($l)) { break }
+        if ($l -match '^\s*-+\s*$') { continue }
+        if ([string]::IsNullOrWhiteSpace($l)) {
+            # Skip blank lines before table or between sections.
+            continue
+        }
 
         $parts = @($l -split '\s{2,}' | Where-Object { $_ -ne "" })
         if ($parts.Count -ge 2) { $ids.Add($parts[1]) | Out-Null }
@@ -438,6 +443,11 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         )
         if ($Force) { $args += "--force" }
 
+        if ($WhatIf) {
+            $r.Actions.Add("[WHATIF] EXPLICIT: winget $($args -join ' ')")
+            continue
+        }
+
         Write-Log "EXPLICIT: winget $($args -join ' ')"
         $outX = @(& winget @args 2>&1)
         $ecX  = $LASTEXITCODE
@@ -463,6 +473,11 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
             "--disable-interactivity","--verbose-logs","-o",$retryLog
         )
         if ($Force) { $retryArgs += "--force" }
+
+        if ($WhatIf) {
+            $r.Actions.Add("[WHATIF] RETRY: winget $($retryArgs -join ' ')")
+            continue
+        }
 
         Write-Log "RETRY: winget $($retryArgs -join ' ')"
         $outR = @(& winget @retryArgs 2>&1)
