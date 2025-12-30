@@ -394,7 +394,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     $upgradeArgs = @(
         "upgrade","--all",
         "--accept-source-agreements","--accept-package-agreements",
-        "--disable-interactivity","--verbose-logs"
+        "--disable-interactivity"
     )
     if ($IncludeUnknown) { $upgradeArgs += "--include-unknown" }
     if ($Force)          { $upgradeArgs += "--force" }
