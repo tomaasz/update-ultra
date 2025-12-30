@@ -504,7 +504,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         if ($ecX -eq 0) { $r.Counts.Ok++; $r.Actions.Add("EXPLICIT OK: $id") }
         else {
             $r.Counts.Fail++
-            $r.Failures.Add("EXPLICIT FAIL: $id (exitCode=$ecX) log=$singleLog")
+            $r.Failures.Add("EXPLICIT FAIL: $id (exitCode=$ecX) log=$(Resolve-ExistingLogOrNote -Path $singleLog)")
             # Policy: First non-zero exit code determines the section result.
             if ($r.ExitCode -eq 0) { $r.ExitCode = $ecX }
         }
@@ -542,7 +542,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         if ($ecR -eq 0) { $r.Counts.Ok++; $r.Actions.Add("RETRY OK: $id") }
         else {
             $r.Counts.Fail++
-            $r.Failures.Add("RETRY FAIL: $id (exitCode=$ecR) log=$retryLog")
+            $r.Failures.Add("RETRY FAIL: $id (exitCode=$ecR) log=$(Resolve-ExistingLogOrNote -Path $retryLog)")
             if ($r.ExitCode -eq 0) { $r.ExitCode = $ecR }
         }
     }
