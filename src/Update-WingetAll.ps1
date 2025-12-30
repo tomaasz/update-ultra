@@ -67,6 +67,26 @@ function Test-CommandExists {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Sanitize-FileName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return "unknown" }
+
+    # 1. Replace invalid chars with _
+    # Invalid: \ / : * ? " < > |
+    $clean = $Name -replace '[\\/:*?"<>|]', '_'
+
+    # 2. Replace whitespace with _
+    $clean = $clean -replace '\s+', '_'
+
+    # 3. Trim trailing dots/spaces/underscores
+    $clean = $clean -replace '[._]+$', ''
+
+    # 4. Collapse multiple underscores
+    $clean = $clean -replace '_+', '_'
+
+    return $clean
+}
+
 function Write-Log {
     param(
         [string]$Message,
@@ -268,9 +288,11 @@ function Get-PythonTargets {
             if (Test-CommandExists $name) {
                 try {
                     & $name --version *> $null
-                    $targets.Add($name) | Out-Null
+                    if ($LASTEXITCODE -eq 0) {
+                        $targets.Add($name) | Out-Null
+                    }
                 } catch {
-                    Write-Log "Interpreter '$name' w PATH nie działa (alias/launcher). Pomijam." "WARN"
+                    # Ignorujemy błędy uruchamiania (np. alias do Store, brak faktycznego pliku)
                 }
             }
         }
@@ -392,7 +414,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     $upgradeArgs = @(
         "upgrade","--all",
         "--accept-source-agreements","--accept-package-agreements",
-        "--disable-interactivity","--verbose-logs","-o",$wingetAllLog
+        "--disable-interactivity"
     )
     if ($IncludeUnknown) { $upgradeArgs += "--include-unknown" }
     if ($Force)          { $upgradeArgs += "--force" }
@@ -404,14 +426,14 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     }
 
     Write-Log "winget $($upgradeArgs -join ' ')"
-    $ecAll = Try-Run -Body { winget @upgradeArgs } -OutputLines ([ref]$lines)
+    $ecAll = Try-Run -Body { winget @upgradeArgs 2>&1 | Tee-Object -FilePath $wingetAllLog } -OutputLines ([ref]$lines)
     $r.ExitCode = $ecAll
     @($lines) | ForEach-Object { Write-Log $_ }
 
     if ($ecAll -ne 0) {
         try {
             Write-Log "winget error $ecAll (dekodowanie):"
-            @((winget error $ecAll) 2>&1) | ForEach-Object { Write-Log $_ } | Out-Null
+            @((winget error --input "$ecAll") 2>&1) | ForEach-Object { Write-Log $_ } | Out-Null
         } catch {}
     }
 
@@ -428,8 +450,9 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     }
 
     foreach ($id in $explicitIds) {
-        $singleLog = Join-Path $LogDirectory ("winget_explicit_{0}_{1}.log" -f $id.Replace(".","_"), (Get-Date -Format "yyyyMMdd_HHmmss"))
-        $r.Artifacts["winget_explicit_$($id)"] = $singleLog
+        $cleanId = Sanitize-FileName $id
+        $singleLog = Join-Path $LogDirectory ("winget_explicit_{0}_{1}.log" -f $cleanId, (Get-Date -Format "yyyyMMdd_HHmmss"))
+        $r.Artifacts["winget_explicit_$($cleanId)"] = $singleLog
 
         $args = @(
             "upgrade","--id",$id,"-e",
@@ -445,7 +468,11 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
 
         $r.Counts.Total++
         if ($ecX -eq 0) { $r.Counts.Ok++; $r.Actions.Add("EXPLICIT OK: $id") }
-        else { $r.Counts.Fail++; $r.Failures.Add("EXPLICIT FAIL: $id (exitCode=$ecX) log=$singleLog") }
+        else {
+            $r.Counts.Fail++
+            $r.Failures.Add("EXPLICIT FAIL: $id (exitCode=$ecX) log=$singleLog")
+            if ($r.ExitCode -eq 0) { $r.ExitCode = $ecX }
+        }
     }
 
     foreach ($id in $WingetRetryIds) {
@@ -454,8 +481,9 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         if ($blockers   | Where-Object { $_.Id -eq $id }) { $shouldRetry = $true }
         if (-not $shouldRetry) { continue }
 
-        $retryLog = Join-Path $LogDirectory ("winget_retry_{0}_{1}.log" -f $id.Replace(".","_"), (Get-Date -Format "yyyyMMdd_HHmmss"))
-        $r.Artifacts["winget_retry_$($id)"] = $retryLog
+        $cleanId = Sanitize-FileName $id
+        $retryLog = Join-Path $LogDirectory ("winget_retry_{0}_{1}.log" -f $cleanId, (Get-Date -Format "yyyyMMdd_HHmmss"))
+        $r.Artifacts["winget_retry_$($cleanId)"] = $retryLog
 
         $retryArgs = @(
             "upgrade","--id",$id,"-e",
@@ -471,7 +499,11 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
 
         $r.Counts.Total++
         if ($ecR -eq 0) { $r.Counts.Ok++; $r.Actions.Add("RETRY OK: $id") }
-        else { $r.Counts.Fail++; $r.Failures.Add("RETRY FAIL: $id (exitCode=$ecR) log=$retryLog") }
+        else {
+            $r.Counts.Fail++
+            $r.Failures.Add("RETRY FAIL: $id (exitCode=$ecR) log=$retryLog")
+            if ($r.ExitCode -eq 0) { $r.ExitCode = $ecR }
+        }
     }
 
     Write-Log "LIST PO: winget upgrade"
