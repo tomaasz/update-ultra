@@ -99,6 +99,15 @@ function Sanitize-FileName {
     return $clean
 }
 
+function Resolve-ExistingLogOrNote {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return "(no log path)" }
+    if (Test-Path -LiteralPath $Path) {
+        return $Path
+    }
+    return "(log not created – winget exited before log was written)"
+}
+
 function Write-Log {
     param(
         [string]$Message,
@@ -404,7 +413,6 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     } else {
         Write-Log "Aktualizacja App Installer..."
         $aiLog = Join-Path $LogDirectory ("winget_AppInstaller_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
-        $r.Artifacts["winget_appinstaller_log"] = $aiLog
 
         $aiArgs = @(
             "upgrade","--id","Microsoft.AppInstaller","-e",
@@ -418,6 +426,8 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         $aiOut | ForEach-Object { Write-Log $_ }
         Write-Log "ExitCode AppInstaller: $aiEc"
 
+        $r.Artifacts["winget_appinstaller_log"] = Resolve-ExistingLogOrNote -Path $aiLog
+
         if ($aiOut -match 'No available upgrade found') {
             $r.Notes.Add("AppInstaller: brak nowszej wersji (OK).")
         } elseif ($aiEc -ne 0) {
@@ -426,7 +436,6 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     }
 
     $wingetAllLog = Join-Path $LogDirectory ("winget_all_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
-    $r.Artifacts["winget_all_log"] = $wingetAllLog
 
     $upgradeArgs = @(
         "upgrade","--all",
@@ -446,6 +455,8 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     $ecAll = Try-Run -Body { winget @upgradeArgs 2>&1 | Tee-Object -FilePath $wingetAllLog } -OutputLines ([ref]$lines)
     $r.ExitCode = $ecAll
     @($lines) | ForEach-Object { Write-Log $_ }
+
+    $r.Artifacts["winget_all_log"] = Resolve-ExistingLogOrNote -Path $wingetAllLog
 
     if ($ecAll -ne 0) {
         try {
@@ -469,7 +480,6 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     foreach ($id in $explicitIds) {
         $cleanId = Sanitize-FileName $id
         $singleLog = Join-Path $LogDirectory ("winget_explicit_{0}_{1}.log" -f $cleanId, (Get-Date -Format "yyyyMMdd_HHmmss"))
-        $r.Artifacts["winget_explicit_$($cleanId)"] = $singleLog
 
         $args = @(
             "upgrade","--id",$id,"-e",
@@ -487,6 +497,8 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         $outX = @(& winget @args 2>&1)
         $ecX  = $LASTEXITCODE
         $outX | ForEach-Object { Write-Log $_ }
+
+        $r.Artifacts["winget_explicit_$($cleanId)"] = Resolve-ExistingLogOrNote -Path $singleLog
 
         $r.Counts.Total++
         if ($ecX -eq 0) { $r.Counts.Ok++; $r.Actions.Add("EXPLICIT OK: $id") }
@@ -506,7 +518,6 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
 
         $cleanId = Sanitize-FileName $id
         $retryLog = Join-Path $LogDirectory ("winget_retry_{0}_{1}.log" -f $cleanId, (Get-Date -Format "yyyyMMdd_HHmmss"))
-        $r.Artifacts["winget_retry_$($cleanId)"] = $retryLog
 
         $retryArgs = @(
             "upgrade","--id",$id,"-e",
@@ -524,6 +535,8 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         $outR = @(& winget @retryArgs 2>&1)
         $ecR  = $LASTEXITCODE
         $outR | ForEach-Object { Write-Log $_ }
+
+        $r.Artifacts["winget_retry_$($cleanId)"] = Resolve-ExistingLogOrNote -Path $retryLog
 
         $r.Counts.Total++
         if ($ecR -eq 0) { $r.Counts.Ok++; $r.Actions.Add("RETRY OK: $id") }
