@@ -71,9 +71,9 @@ function Sanitize-FileName {
     param([string]$Name)
     if ([string]::IsNullOrWhiteSpace($Name)) { return "unknown" }
 
-    # 1. Replace invalid chars with _
-    # Invalid: \ / : * ? " < > |
-    $clean = $Name -replace '[\\/:*?"<>|]', '_'
+    # 1. Replace invalid chars with _ (including control chars)
+    # Invalid: \ / : * ? " < > | and range 0x00-0x1F
+    $clean = $Name -replace '[\\/:*?"<>|\x00-\x1F]', '_'
 
     # 2. Replace whitespace with _
     $clean = $clean -replace '\s+', '_'
@@ -83,6 +83,18 @@ function Sanitize-FileName {
 
     # 4. Collapse multiple underscores
     $clean = $clean -replace '_+', '_'
+
+    # 5. Handle reserved names
+    if ($clean -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
+        $clean = "_$clean"
+    }
+
+    # 6. Cap length (120) + hash to avoid long paths/collisions
+    if ($clean.Length -gt 120) {
+        $hash = 0
+        foreach ($c in [char[]]$clean) { $hash = ($hash * 31 + [int]$c) % 0xFFFFFFFF }
+        $clean = $clean.Substring(0, 120) + "_" + $hash.ToString("X")
+    }
 
     return $clean
 }
@@ -471,6 +483,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         else {
             $r.Counts.Fail++
             $r.Failures.Add("EXPLICIT FAIL: $id (exitCode=$ecX) log=$singleLog")
+            # Policy: First non-zero exit code determines the section result.
             if ($r.ExitCode -eq 0) { $r.ExitCode = $ecX }
         }
     }

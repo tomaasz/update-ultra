@@ -9,6 +9,7 @@ z czytelnym podsumowaniem + JSON summary.
 - Bezpieczne uruchamianie kroków (każdy krok osobno)
 - Przełączniki Skip dla sekcji
 - Logi Winget "explicit" mają sanitizowane nazwy plików (usuwanie spacji i znaków specjalnych).
+- Sekcja Winget raportuje ExitCode pierwszego napotkanego błędu (jeśli wystąpią błędy).
 
 ## Wymagania
 - Windows 11
