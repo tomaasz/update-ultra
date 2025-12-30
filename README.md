@@ -8,6 +8,8 @@ z czytelnym podsumowaniem + JSON summary.
 - Pełny log tekstowy + plik summary JSON
 - Bezpieczne uruchamianie kroków (każdy krok osobno)
 - Przełączniki Skip dla sekcji
+- Logi Winget "explicit" mają sanitizowane nazwy plików (usuwanie spacji i znaków specjalnych).
+- Sekcja Winget raportuje ExitCode pierwszego napotkanego błędu (jeśli wystąpią błędy).
 
 ## Wymagania
 - Windows 11
@@ -19,3 +21,11 @@ z czytelnym podsumowaniem + JSON summary.
 ```powershell
 # uruchom jako Administrator
 .\src\Update-WingetAll.ps1
+```
+
+## Testy
+Aby uruchomić testy lokalnie (np. testy sanityzacji):
+```powershell
+pwsh -NoProfile -File .\tests\test_sanitize.ps1
+```
+Testy uruchamiane są automatycznie w GitHub Actions.

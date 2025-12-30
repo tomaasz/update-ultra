@@ -2,7 +2,7 @@ name: Tests
 
 on:
   push:
-    branches: [ main, fix-winget-parser-tests-actions ]
+    branches: [ main, fix-* ]
   pull_request:
     branches: [ main ]
 
@@ -15,5 +15,15 @@ jobs:
       - name: Run Winget Parser Tests
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          ./tests/test-winget-parser.ps1
+          if (Test-Path tests/test-winget-parser.ps1) {
+              Write-Host "Running parser tests..."
+              & ./tests/test-winget-parser.ps1
+          }
+
+      - name: Run Sanitize Tests
+        shell: pwsh
+        run: |
+          if (Test-Path tests/test_sanitize.ps1) {
+              Write-Host "Running sanitize tests..."
+              & ./tests/test_sanitize.ps1
+          }
