@@ -417,12 +417,13 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         $aiArgs = @(
             "upgrade","--id","Microsoft.AppInstaller","-e",
             "--accept-source-agreements","--accept-package-agreements",
-            "--disable-interactivity","--verbose-logs","-o",$aiLog
+            "--disable-interactivity"
         )
         if ($Force) { $aiArgs += "--force" }
 
         $aiOut = @(& winget @aiArgs 2>&1)
         $aiEc  = $LASTEXITCODE
+        try { $aiOut | Set-Content -LiteralPath $aiLog -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
         $aiOut | ForEach-Object { Write-Log $_ }
         Write-Log "ExitCode AppInstaller: $aiEc"
 
@@ -484,7 +485,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         $args = @(
             "upgrade","--id",$id,"-e",
             "--accept-source-agreements","--accept-package-agreements",
-            "--disable-interactivity","--verbose-logs","-o",$singleLog
+            "--disable-interactivity"
         )
         if ($Force) { $args += "--force" }
 
@@ -496,6 +497,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         Write-Log "EXPLICIT: winget $($args -join ' ')"
         $outX = @(& winget @args 2>&1)
         $ecX  = $LASTEXITCODE
+        try { $outX | Set-Content -LiteralPath $singleLog -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
         $outX | ForEach-Object { Write-Log $_ }
 
         $r.Artifacts["winget_explicit_$($cleanId)"] = Resolve-ExistingLogOrNote -Path $singleLog
@@ -522,7 +524,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         $retryArgs = @(
             "upgrade","--id",$id,"-e",
             "--accept-source-agreements","--accept-package-agreements",
-            "--disable-interactivity","--verbose-logs","-o",$retryLog
+            "--disable-interactivity"
         )
         if ($Force) { $retryArgs += "--force" }
 
@@ -534,6 +536,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         Write-Log "RETRY: winget $($retryArgs -join ' ')"
         $outR = @(& winget @retryArgs 2>&1)
         $ecR  = $LASTEXITCODE
+        try { $outR | Set-Content -LiteralPath $retryLog -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
         $outR | ForEach-Object { Write-Log $_ }
 
         $r.Artifacts["winget_retry_$($cleanId)"] = Resolve-ExistingLogOrNote -Path $retryLog
