@@ -273,9 +273,11 @@ function Get-PythonTargets {
             if (Test-CommandExists $name) {
                 try {
                     & $name --version *> $null
-                    $targets.Add($name) | Out-Null
+                    if ($LASTEXITCODE -eq 0) {
+                        $targets.Add($name) | Out-Null
+                    }
                 } catch {
-                    Write-Log "Interpreter '$name' w PATH nie działa (alias/launcher). Pomijam." "WARN"
+                    # Ignorujemy błędy uruchamiania (np. alias do Store, brak faktycznego pliku)
                 }
             }
         }
@@ -397,7 +399,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     $upgradeArgs = @(
         "upgrade","--all",
         "--accept-source-agreements","--accept-package-agreements",
-        "--disable-interactivity","--verbose-logs","-o",$wingetAllLog
+        "--disable-interactivity"
     )
     if ($IncludeUnknown) { $upgradeArgs += "--include-unknown" }
     if ($Force)          { $upgradeArgs += "--force" }
@@ -409,14 +411,14 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     }
 
     Write-Log "winget $($upgradeArgs -join ' ')"
-    $ecAll = Try-Run -Body { winget @upgradeArgs } -OutputLines ([ref]$lines)
+    $ecAll = Try-Run -Body { winget @upgradeArgs 2>&1 | Tee-Object -FilePath $wingetAllLog } -OutputLines ([ref]$lines)
     $r.ExitCode = $ecAll
     @($lines) | ForEach-Object { Write-Log $_ }
 
     if ($ecAll -ne 0) {
         try {
             Write-Log "winget error $ecAll (dekodowanie):"
-            @((winget error $ecAll) 2>&1) | ForEach-Object { Write-Log $_ } | Out-Null
+            @((winget error --input "$ecAll") 2>&1) | ForEach-Object { Write-Log $_ } | Out-Null
         } catch {}
     }
 
