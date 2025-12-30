@@ -22,3 +22,10 @@ z czytelnym podsumowaniem + JSON summary.
 # uruchom jako Administrator
 .\src\Update-WingetAll.ps1
 ```
+
+## Testy
+Aby uruchomić testy lokalnie (np. testy sanityzacji):
+```powershell
+pwsh -NoProfile -File .\tests\test_sanitize.ps1
+```
+Testy uruchamiane są automatycznie w GitHub Actions.
