@@ -1,12 +1,17 @@
 <#
-Update-WingetAll.ps1 — ULTRA v3.3
+Update-WingetAll.ps1 — ULTRA v4.0
 
-Naprawy vs v3.2:
-- 100% odporność na PS "Count" (pojedynczy obiekt vs tablica vs pipeline unrolling)
-- Winget parsing: $parts zawsze jest tablicą (@(...))
-- Python/Pip: SafeCount nie opiera się na To-Array output
-- Docker: jeśli daemon/CLI zwróci błąd przy listowaniu obrazów -> SKIP, nie pull "tekstu błędu"
-- Debug: w razie wyjątku pokazuje Linia + Kod
+Nowe w v4.0:
+- Naprawiono parser winget (nie wyciąga już linii postępu jako pakietów)
+- Dodano ignorowanie pakietów (Discord.Discord w $WingetIgnoreIds)
+- Dodano 10 nowych środowisk: Scoop, pipx, Cargo, Go, Ruby, Composer, Yarn, pnpm, MS Store, WSL Distros (apt/yum)
+- Wszystkie sekcje automatycznie wykrywają czy narzędzie jest zainstalowane (SKIP jeśli brak)
+- Skrypt jest uniwersalny - działa na różnych komputerach
+
+Naprawy vs v3.3:
+- FIX: Winget parser nie wyciąga już linii postępu (2%, 100%, MB, etc.) jako ID pakietów
+- FIX: Użycie regex do wykrywania prawdziwych ID pakietów (format Vendor.Product)
+- FIX: Unary comma w zwracanych tablicach aby uniknąć rozpakowania przez PowerShell
 
 #>
 
@@ -25,7 +30,17 @@ param(
     [switch]$SkipVSCode,
     [switch]$SkipDocker,
     [switch]$SkipGit,
-    [switch]$SkipWSL
+    [switch]$SkipWSL,
+    [switch]$SkipScoop,
+    [switch]$SkipPipx,
+    [switch]$SkipCargo,
+    [switch]$SkipGo,
+    [switch]$SkipRuby,
+    [switch]$SkipComposer,
+    [switch]$SkipYarn,
+    [switch]$SkipPnpm,
+    [switch]$SkipMSStore,
+    [switch]$SkipWSLDistros
 )
 
 Set-StrictMode -Version Latest
@@ -44,11 +59,20 @@ $PythonVenvRootPaths = @("C:\venv", "$env:USERPROFILE\.virtualenvs")
 $PythonVenvExplicit  = @()
 
 $WingetRetryIds = @("Notepad++.Notepad++")
+$WingetIgnoreIds = @("Discord.Discord") # Packages to ignore failures (e.g., pinned packages that auto-update)
 
 $DockerImagesToUpdate = @() # empty = update all local images
 
 $GitRepos     = @()
 $GitRootPaths = @("C:\Dev")
+
+# Go tools to update (empty = skip)
+$GoTools = @()
+# Example: @("github.com/golangci/golangci-lint/cmd/golangci-lint@latest")
+
+# WSL distros to update (empty = auto-detect running distros)
+$WSLDistros = @()
+# Example: @("Ubuntu", "Debian")
 # -----------------------------------------
 
 # ----------------- SAFE HELPERS -----------------
@@ -240,24 +264,41 @@ function Get-WingetExplicitTargetIds {
 
     $ids = New-Object System.Collections.Generic.List[string]
     $inTable = $false
+    $tableStarted = $false
 
     foreach ($raw in (As-Array $Lines)) {
         $l = [string]$raw
 
         if ($l -match 'require explicit targeting') { $inTable = $true; continue }
         if (-not $inTable) { continue }
+
+        # Skip header and separator
         if ($l -match '^\s*Name\s+Id\s+Version') { continue }
-        if ($l -match '^\s*-+\s*$') { continue }
-        if ([string]::IsNullOrWhiteSpace($l)) {
-            # Skip blank lines before table or between sections.
-            continue
+        if ($l -match '^\s*-+\s*$') { $tableStarted = $true; continue }
+
+        # Stop parsing when we hit a blank line AFTER table started, or found/downloading lines
+        if ($tableStarted) {
+            if ([string]::IsNullOrWhiteSpace($l)) { break }
+            if ($l -match '^\s*\(?\d+/\d+\)?\s*(Found|Downloading)') { break }
         }
 
-        $parts = @($l -split '\s{2,}' | Where-Object { $_ -ne "" })
-        if ($parts.Count -ge 2) { $ids.Add($parts[1]) | Out-Null }
+        # Skip blank lines before table starts
+        if ([string]::IsNullOrWhiteSpace($l)) { continue }
+
+        # Parse table rows: Name Id Version Available Source
+        # Use regex to extract ID - typically in format Vendor.Product or similar
+        # Match pattern: some text, then a word with dots (ID), then version numbers
+        if ($l -match '\s+([A-Za-z0-9][A-Za-z0-9._\-]+?)\s+[\d\.]+\s+[\d\.]+\s+\w+\s*$') {
+            $id = $Matches[1].Trim()
+            if (-not [string]::IsNullOrWhiteSpace($id)) {
+                $ids.Add($id) | Out-Null
+            }
+        }
     }
 
-    return @($ids | Select-Object -Unique)
+    # Ensure we always return an array (use unary comma to prevent PowerShell from unrolling single-item arrays)
+    $result = @($ids.ToArray() | Select-Object -Unique)
+    return ,$result
 }
 
 function Get-WingetRunningBlockers {
@@ -362,7 +403,7 @@ if (-not (Test-Path -LiteralPath $LogDirectory)) {
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $script:logFile = Join-Path $LogDirectory "dev_update_$timestamp.log"
 
-Write-Log "===== START UPDATE (ULTRA v3.3) ====="
+Write-Log "===== START UPDATE (ULTRA v4.0) ====="
 Write-Log "Log: $script:logFile"
 Write-Log "WhatIf: $WhatIf, Force: $Force, IncludeUnknown: $IncludeUnknown"
 
@@ -500,13 +541,24 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
 
         $r.Artifacts["winget_explicit_$($cleanId)"] = Resolve-ExistingLogOrNote -Path $singleLog
 
+        $isIgnored = $WingetIgnoreIds -contains $id
+
         $r.Counts.Total++
-        if ($ecX -eq 0) { $r.Counts.Ok++; $r.Actions.Add("EXPLICIT OK: $id") }
+        if ($ecX -eq 0) {
+            $r.Counts.Ok++
+            $r.Actions.Add("EXPLICIT OK: $id")
+        }
         else {
-            $r.Counts.Fail++
-            $r.Failures.Add("EXPLICIT FAIL: $id (exitCode=$ecX) log=$(Resolve-ExistingLogOrNote -Path $singleLog)")
-            # Policy: First non-zero exit code determines the section result.
-            if ($r.ExitCode -eq 0) { $r.ExitCode = $ecX }
+            if ($isIgnored) {
+                # Don't count ignored packages as failures
+                $r.Notes.Add("EXPLICIT IGNORED: $id (exitCode=$ecX, package is in ignore list)")
+                Write-Log "EXPLICIT IGNORED: $id (exitCode=$ecX, in ignore list)" "WARN"
+            } else {
+                $r.Counts.Fail++
+                $r.Failures.Add("EXPLICIT FAIL: $id (exitCode=$ecX) log=$(Resolve-ExistingLogOrNote -Path $singleLog)")
+                # Policy: First non-zero exit code determines the section result.
+                if ($r.ExitCode -eq 0) { $r.ExitCode = $ecX }
+            }
         }
     }
 
@@ -538,12 +590,23 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
 
         $r.Artifacts["winget_retry_$($cleanId)"] = Resolve-ExistingLogOrNote -Path $retryLog
 
+        $isIgnored = $WingetIgnoreIds -contains $id
+
         $r.Counts.Total++
-        if ($ecR -eq 0) { $r.Counts.Ok++; $r.Actions.Add("RETRY OK: $id") }
+        if ($ecR -eq 0) {
+            $r.Counts.Ok++
+            $r.Actions.Add("RETRY OK: $id")
+        }
         else {
-            $r.Counts.Fail++
-            $r.Failures.Add("RETRY FAIL: $id (exitCode=$ecR) log=$(Resolve-ExistingLogOrNote -Path $retryLog)")
-            if ($r.ExitCode -eq 0) { $r.ExitCode = $ecR }
+            if ($isIgnored) {
+                # Don't count ignored packages as failures
+                $r.Notes.Add("RETRY IGNORED: $id (exitCode=$ecR, package is in ignore list)")
+                Write-Log "RETRY IGNORED: $id (exitCode=$ecR, in ignore list)" "WARN"
+            } else {
+                $r.Counts.Fail++
+                $r.Failures.Add("RETRY FAIL: $id (exitCode=$ecR) log=$(Resolve-ExistingLogOrNote -Path $retryLog)")
+                if ($r.ExitCode -eq 0) { $r.ExitCode = $ecR }
+            }
         }
     }
 
@@ -818,9 +881,296 @@ $Results.Add((Invoke-Step -Name "WSL" -Skip:$SkipWSL -Body {
     if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("wsl --update exitCode=$ec") }
 }))
 
+# 10) SCOOP
+$Results.Add((Invoke-Step -Name "Scoop" -Skip:$SkipScoop -Body {
+    param($r)
+    if (-not (Test-CommandExists "scoop")) { $r.Status="SKIP"; $r.Notes.Add("scoop brak w PATH."); return }
+    if ($WhatIf) { $r.Actions.Add("[WHATIF] scoop update *"); return }
+
+    Write-Log "scoop update..."
+    $out = @()
+    $ec = Try-Run -Body { scoop update } -OutputLines ([ref]$out)
+    $out | ForEach-Object { Write-Log $_ }
+
+    Write-Log "scoop update *..."
+    $out2 = @()
+    $ec2 = Try-Run -Body { scoop update * } -OutputLines ([ref]$out2)
+    $out2 | ForEach-Object { Write-Log $_ }
+
+    $r.ExitCode = if ($ec -ne 0) { $ec } else { $ec2 }
+    if ($r.ExitCode -ne 0) { $r.Status="FAIL"; $r.Failures.Add("scoop update exitCode=$($r.ExitCode)") }
+}))
+
+# 11) PIPX
+$Results.Add((Invoke-Step -Name "pipx" -Skip:$SkipPipx -Body {
+    param($r)
+    if (-not (Test-CommandExists "pipx")) { $r.Status="SKIP"; $r.Notes.Add("pipx brak w PATH."); return }
+    if ($WhatIf) { $r.Actions.Add("[WHATIF] pipx upgrade-all"); return }
+
+    Write-Log "pipx upgrade-all..."
+    $out = @()
+    $ec = Try-Run -Body { pipx upgrade-all } -OutputLines ([ref]$out)
+    $out | ForEach-Object { Write-Log $_ }
+    $r.ExitCode = $ec
+    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("pipx upgrade-all exitCode=$ec") }
+}))
+
+# 12) CARGO (Rust)
+$Results.Add((Invoke-Step -Name "Cargo (Rust)" -Skip:$SkipCargo -Body {
+    param($r)
+    if (-not (Test-CommandExists "cargo")) { $r.Status="SKIP"; $r.Notes.Add("cargo brak w PATH."); return }
+
+    # Check if cargo-update is installed
+    $hasCargoUpdate = $false
+    try {
+        $checkOut = @((cargo install --list) 2>&1)
+        if ($checkOut -match 'cargo-update') { $hasCargoUpdate = $true }
+    } catch {}
+
+    if (-not $hasCargoUpdate) {
+        $r.Status="SKIP"
+        $r.Notes.Add("cargo-update nie jest zainstalowany. Zainstaluj: cargo install cargo-update")
+        return
+    }
+
+    if ($WhatIf) { $r.Actions.Add("[WHATIF] cargo install-update -a"); return }
+
+    Write-Log "cargo install-update -a..."
+    $out = @()
+    $ec = Try-Run -Body { cargo install-update -a } -OutputLines ([ref]$out)
+    $out | ForEach-Object { Write-Log $_ }
+    $r.ExitCode = $ec
+    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("cargo install-update exitCode=$ec") }
+}))
+
+# 13) GO TOOLS
+$Results.Add((Invoke-Step -Name "Go Tools" -Skip:$SkipGo -Body {
+    param($r)
+    if (-not (Test-CommandExists "go")) { $r.Status="SKIP"; $r.Notes.Add("go brak w PATH."); return }
+
+    if ($GoTools.Count -eq 0) {
+        $r.Status="SKIP"
+        $r.Notes.Add("Brak skonfigurowanych narzędzi Go (zmienna `$GoTools pusta).")
+        return
+    }
+
+    if ($WhatIf) { $r.Actions.Add("[WHATIF] go install dla $($GoTools.Count) narzędzi"); return }
+
+    $r.Actions.Add("Go tools: $($GoTools.Count)")
+    foreach ($tool in $GoTools) {
+        $r.Counts.Total++
+        try {
+            Write-Log "go install $tool"
+            @((go install $tool) 2>&1) | ForEach-Object { Write-Log $_ }
+            if ($LASTEXITCODE -eq 0) { $r.Counts.Ok++ }
+            else { $r.Counts.Fail++; $r.Failures.Add("go install FAIL: $tool (exitCode=$LASTEXITCODE)") }
+        } catch {
+            $r.Counts.Fail++
+            $r.Failures.Add("go install FAIL: $tool :: $($_.Exception.Message)")
+        }
+    }
+    if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
+}))
+
+# 14) RUBY GEMS
+$Results.Add((Invoke-Step -Name "Ruby Gems" -Skip:$SkipRuby -Body {
+    param($r)
+    if (-not (Test-CommandExists "gem")) { $r.Status="SKIP"; $r.Notes.Add("gem brak w PATH."); return }
+    if ($WhatIf) { $r.Actions.Add("[WHATIF] gem update --system && gem update"); return }
+
+    Write-Log "gem update --system..."
+    $out = @()
+    $ec = Try-Run -Body { gem update --system } -OutputLines ([ref]$out)
+    $out | ForEach-Object { Write-Log $_ }
+
+    Write-Log "gem update..."
+    $out2 = @()
+    $ec2 = Try-Run -Body { gem update } -OutputLines ([ref]$out2)
+    $out2 | ForEach-Object { Write-Log $_ }
+
+    $r.ExitCode = if ($ec -ne 0) { $ec } else { $ec2 }
+    if ($r.ExitCode -ne 0) { $r.Status="FAIL"; $r.Failures.Add("gem update exitCode=$($r.ExitCode)") }
+}))
+
+# 15) COMPOSER (PHP)
+$Results.Add((Invoke-Step -Name "Composer (PHP)" -Skip:$SkipComposer -Body {
+    param($r)
+    if (-not (Test-CommandExists "composer")) { $r.Status="SKIP"; $r.Notes.Add("composer brak w PATH."); return }
+    if ($WhatIf) { $r.Actions.Add("[WHATIF] composer global update"); return }
+
+    Write-Log "composer global update..."
+    $out = @()
+    $ec = Try-Run -Body { composer global update } -OutputLines ([ref]$out)
+    $out | ForEach-Object { Write-Log $_ }
+    $r.ExitCode = $ec
+    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("composer global update exitCode=$ec") }
+}))
+
+# 16) YARN
+$Results.Add((Invoke-Step -Name "Yarn (global)" -Skip:$SkipYarn -Body {
+    param($r)
+    if (-not (Test-CommandExists "yarn")) { $r.Status="SKIP"; $r.Notes.Add("yarn brak w PATH."); return }
+    if ($WhatIf) { $r.Actions.Add("[WHATIF] yarn global upgrade"); return }
+
+    Write-Log "yarn global upgrade..."
+    $out = @()
+    $ec = Try-Run -Body { yarn global upgrade } -OutputLines ([ref]$out)
+    $out | ForEach-Object { Write-Log $_ }
+    $r.ExitCode = $ec
+    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("yarn global upgrade exitCode=$ec") }
+}))
+
+# 17) PNPM
+$Results.Add((Invoke-Step -Name "pnpm (global)" -Skip:$SkipPnpm -Body {
+    param($r)
+    if (-not (Test-CommandExists "pnpm")) { $r.Status="SKIP"; $r.Notes.Add("pnpm brak w PATH."); return }
+    if ($WhatIf) { $r.Actions.Add("[WHATIF] pnpm update -g"); return }
+
+    Write-Log "pnpm update -g..."
+    $out = @()
+    $ec = Try-Run -Body { pnpm update -g } -OutputLines ([ref]$out)
+    $out | ForEach-Object { Write-Log $_ }
+    $r.ExitCode = $ec
+    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("pnpm update -g exitCode=$ec") }
+}))
+
+# 18) MS STORE APPS
+$Results.Add((Invoke-Step -Name "MS Store Apps" -Skip:$SkipMSStore -Body {
+    param($r)
+    if (-not (Test-CommandExists "winget")) { $r.Status="SKIP"; $r.Notes.Add("winget brak w PATH."); return }
+    if ($WhatIf) { $r.Actions.Add("[WHATIF] winget upgrade --source msstore"); return }
+
+    Write-Log "winget upgrade --source msstore..."
+    $args = @("upgrade", "--all", "--source", "msstore", "--accept-source-agreements", "--accept-package-agreements")
+    $out = @()
+    $ec = Try-Run -Body { winget @args } -OutputLines ([ref]$out)
+    $out | ForEach-Object { Write-Log $_ }
+    $r.ExitCode = $ec
+    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("winget msstore exitCode=$ec") }
+}))
+
+# 19) WSL DISTROS (apt/yum/pacman inside)
+$Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDistros -Body {
+    param($r)
+    if (-not (Test-CommandExists "wsl")) { $r.Status="SKIP"; $r.Notes.Add("wsl brak."); return }
+
+    $distros = @()
+    if ($WSLDistros.Count -gt 0) {
+        $distros = @($WSLDistros)
+    } else {
+        # Auto-detect running/available distros
+        try {
+            $wslList = @((wsl -l -q) 2>&1 | Where-Object { $_ -and $_ -notmatch '^\s*$' })
+            foreach ($d in $wslList) {
+                $clean = $d.Trim() -replace '\x00',''
+                if ($clean) { $distros += $clean }
+            }
+        } catch {
+            Write-Log "Nie można pobrać listy dystrybucji WSL: $($_.Exception.Message)" "WARN"
+        }
+    }
+
+    if ($distros.Count -eq 0) { $r.Status="SKIP"; $r.Notes.Add("Brak dystrybucji WSL."); return }
+
+    if ($WhatIf) { $r.Actions.Add("[WHATIF] aktualizacja $($distros.Count) dystrybucji WSL"); return }
+
+    $r.Actions.Add("WSL distros: $($distros.Count)")
+    foreach ($distro in $distros) {
+        $r.Counts.Total++
+
+        $updated = $false
+
+        # Check if distro has apt (Debian/Ubuntu-based)
+        $hasApt = $false
+        try {
+            $checkApt = @((wsl -d $distro -- which apt) 2>&1)
+            if ($LASTEXITCODE -eq 0) { $hasApt = $true }
+        } catch {}
+
+        if ($hasApt) {
+            try {
+                Write-Log "WSL ($distro): apt update && apt upgrade -y"
+                $cmd = "sudo apt update && sudo apt upgrade -y"
+                $outApt = @((wsl -d $distro -- bash -c $cmd) 2>&1)
+                $ecApt = $LASTEXITCODE
+                $outApt | ForEach-Object { Write-Log $_ }
+
+                if ($ecApt -eq 0) { $r.Counts.Ok++ }
+                else { $r.Counts.Fail++; $r.Failures.Add("WSL apt FAIL: $distro (exitCode=$ecApt)") }
+                $updated = $true
+            } catch {
+                $r.Counts.Fail++
+                $r.Failures.Add("WSL apt FAIL: $distro :: $($_.Exception.Message)")
+                $updated = $true
+            }
+        }
+
+        # Try yum (RHEL/CentOS/Fedora-based)
+        if (-not $updated) {
+            $hasYum = $false
+            try {
+                $checkYum = @((wsl -d $distro -- which yum) 2>&1)
+                if ($LASTEXITCODE -eq 0) { $hasYum = $true }
+            } catch {}
+
+            if ($hasYum) {
+                try {
+                    Write-Log "WSL ($distro): yum update -y"
+                    $cmd = "sudo yum update -y"
+                    $outYum = @((wsl -d $distro -- bash -c $cmd) 2>&1)
+                    $ecYum = $LASTEXITCODE
+                    $outYum | ForEach-Object { Write-Log $_ }
+
+                    if ($ecYum -eq 0) { $r.Counts.Ok++ }
+                    else { $r.Counts.Fail++; $r.Failures.Add("WSL yum FAIL: $distro (exitCode=$ecYum)") }
+                    $updated = $true
+                } catch {
+                    $r.Counts.Fail++
+                    $r.Failures.Add("WSL yum FAIL: $distro :: $($_.Exception.Message)")
+                    $updated = $true
+                }
+            }
+        }
+
+        # Try pacman (Arch Linux-based)
+        if (-not $updated) {
+            $hasPacman = $false
+            try {
+                $checkPacman = @((wsl -d $distro -- which pacman) 2>&1)
+                if ($LASTEXITCODE -eq 0) { $hasPacman = $true }
+            } catch {}
+
+            if ($hasPacman) {
+                try {
+                    Write-Log "WSL ($distro): pacman -Syu --noconfirm"
+                    $cmd = "sudo pacman -Syu --noconfirm"
+                    $outPacman = @((wsl -d $distro -- bash -c $cmd) 2>&1)
+                    $ecPacman = $LASTEXITCODE
+                    $outPacman | ForEach-Object { Write-Log $_ }
+
+                    if ($ecPacman -eq 0) { $r.Counts.Ok++ }
+                    else { $r.Counts.Fail++; $r.Failures.Add("WSL pacman FAIL: $distro (exitCode=$ecPacman)") }
+                    $updated = $true
+                } catch {
+                    $r.Counts.Fail++
+                    $r.Failures.Add("WSL pacman FAIL: $distro :: $($_.Exception.Message)")
+                    $updated = $true
+                }
+            }
+        }
+
+        if (-not $updated) {
+            $r.Notes.Add("WSL: $distro - brak apt/yum/pacman, pomijam")
+            Write-Log "WSL: $distro - brak apt/yum/pacman, pomijam" "WARN"
+        }
+    }
+
+    if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
+}))
+
 # ----------------- SUMMARY -----------------
 Write-Host ""
-Write-Host "=== PODSUMOWANIE AKTUALIZACJI (ULTRA v3.3) ==="
+Write-Host "=== PODSUMOWANIE AKTUALIZACJI (ULTRA v4.0) ==="
 
 $summary = $Results | ForEach-Object {
     [pscustomobject]@{
@@ -868,7 +1218,7 @@ try {
 }
 
 Write-Host "Pełny log: $script:logFile"
-Write-Log "===== END UPDATE (ULTRA v3.3) ====="
+Write-Log "===== END UPDATE (ULTRA v4.0) ====="
 
 $overallFail = $Results | Where-Object { $_.Status -eq "FAIL" }
 if ($overallFail) { exit 1 } else { exit 0 }

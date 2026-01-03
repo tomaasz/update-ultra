@@ -12,19 +12,38 @@ $ErrorActionPreference = "Stop"
 # We need to source the functions from the script.
 # Since the script executes code, we need a way to extract functions or prevent execution.
 # For this task, we will extract the relevant functions by reading the file.
-# This avoids modifying the script just to make it sourceable (though that would be better practice).
 
 $scriptPath = Join-Path $PSScriptRoot "../src/Update-WingetAll.ps1"
 $scriptContent = Get-Content -Path $scriptPath -Raw
 
-# Extract functions using regex (simple extraction)
-$functionsToTest = @("Parse-WingetUpgradeList", "Get-WingetExplicitTargetIds", "As-Array")
+# Extract functions using improved regex that handles multi-line functions
+$functionsToTest = @("Parse-WingetUpgradeList", "Get-WingetExplicitTargetIds", "As-Array", "SafeCount")
 
 foreach ($funcName in $functionsToTest) {
     # Match function block: function Name { ... }
-    # This regex is a bit fragile but works for well-formatted code
-    if ($scriptContent -match "(?ms)function\s+$funcName\s*\{.*?\n\}") {
-        Invoke-Expression $Matches[0]
+    # Use a more robust approach: find the function start, then count braces
+    $pattern = "function\s+$funcName\s*\{"
+    $startMatch = [regex]::Match($scriptContent, $pattern)
+
+    if ($startMatch.Success) {
+        $startPos = $startMatch.Index
+        $braceCount = 0
+        $inFunction = $false
+        $functionText = ""
+
+        for ($i = $startPos; $i -lt $scriptContent.Length; $i++) {
+            $char = $scriptContent[$i]
+            $functionText += $char
+
+            if ($char -eq '{') { $braceCount++; $inFunction = $true }
+            if ($char -eq '}') { $braceCount--; }
+
+            if ($inFunction -and $braceCount -eq 0) {
+                break
+            }
+        }
+
+        Invoke-Expression $functionText
     } else {
         Write-Error "Could not extract function $funcName from script."
         exit 1
@@ -119,6 +138,47 @@ try {
 
 } catch {
     Write-Host "[FAIL] Exception during Get-WingetExplicitTargetIds: $_" -ForegroundColor Red
+    $failed++
+}
+
+Write-Host "`n=== Testing Get-WingetExplicitTargetIds with progress lines ==="
+
+# Simulates real winget output with download progress after the table
+$explicitWithProgress = @(
+    "Name       Id                      Version  Available Source",
+    "------------------------------------------------------------",
+    "Okular     KDE.Okular              25.12.0  25.12.1   winget",
+    "Oh My Posh JanDeDobbeleer.OhMyPosh 28.9.0.0 28.10.0   winget",
+    "3 upgrades available.",
+    "",
+    "The following packages have an upgrade available, but require explicit targeting for upgrade:",
+    "Name    Id              Version  Available Source",
+    "-------------------------------------------------",
+    "Discord Discord.Discord 1.0.9210 1.0.9219  winget",
+    "",
+    "(1/2) Found Okular [KDE.Okular] Version 25.12.1",
+    "This application is licensed to you by its owner.",
+    "Downloading https://cdn.kde.org/ci-builds/graphics/okular/release-25.12/windows/okular-release_25.12-7068-windows-cl-msvc2022-x86_64.exe",
+    "  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒  1024 KB /  152 MB",
+    "  ███████▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒  38.0 MB /  152 MB",
+    "  ████████████████▒▒▒▒▒▒▒▒▒▒▒▒▒▒  83.0 MB /  152 MB",
+    "  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒  2%",
+    "  ██▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒  9%",
+    "  ██████████████████████████████  100%"
+)
+
+try {
+    $ids = Get-WingetExplicitTargetIds -Lines $explicitWithProgress
+
+    Assert-True ($ids -is [Array]) "Result should be an array"
+    Assert-Equal $ids.Count 1 "Should find only 1 ID (Discord.Discord), not progress lines"
+    Assert-True ($ids -contains "Discord.Discord") "Should contain Discord.Discord"
+    Assert-True ($ids -notcontains "1024") "Should NOT contain '1024' from progress"
+    Assert-True ($ids -notcontains "2%") "Should NOT contain '2%' from progress"
+    Assert-True ($ids -notcontains "38.0") "Should NOT contain '38.0' from progress"
+
+} catch {
+    Write-Host "[FAIL] Exception during Get-WingetExplicitTargetIds with progress: $_" -ForegroundColor Red
     $failed++
 }
 
