@@ -1109,6 +1109,7 @@ $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDis
     } else {
         # Auto-detect running/available distros
         try {
+            Write-Host "  Wykrywam dystrybucje WSL..." -ForegroundColor Gray
             $wslList = @((wsl -l -q) 2>&1 | Where-Object { $_ -and $_ -notmatch '^\s*$' })
             foreach ($d in $wslList) {
                 $clean = $d.Trim() -replace '\x00',''
@@ -1121,35 +1122,85 @@ $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDis
 
     if ($distros.Count -eq 0) { $r.Status="SKIP"; $r.Notes.Add("Brak dystrybucji WSL."); return }
 
+    Write-Host "  Znaleziono: $($distros.Count) dystrybucji WSL" -ForegroundColor Cyan
+    Write-Host "  Dystrybucje: " -NoNewline -ForegroundColor Gray
+    Write-Host ($distros -join ", ") -ForegroundColor Yellow
+    Write-Host ""
+
+    # Ask user if they want to update (requires sudo password)
+    Write-Host "  UWAGA: Aktualizacja dystrybucji WSL wymaga hasła sudo!" -ForegroundColor Yellow
+    Write-Host "  Będziesz musiał podać hasło dla każdej dystrybucji podczas aktualizacji." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Czy chcesz kontynuować aktualizację WSL distros? [T/n]: " -NoNewline -ForegroundColor Cyan
+
+    $userInput = Read-Host
+    $shouldUpdate = $true
+
+    if ($userInput -match '^[nN]') {
+        $shouldUpdate = $false
+    } elseif ([string]::IsNullOrWhiteSpace($userInput)) {
+        # Default to Yes (just pressed Enter)
+        $shouldUpdate = $true
+    } elseif ($userInput -match '^[tTyY]') {
+        $shouldUpdate = $true
+    }
+
+    if (-not $shouldUpdate) {
+        $r.Status = "SKIP"
+        $r.Notes.Add("Pominięto na życzenie użytkownika (wymaga hasła sudo).")
+        Write-Host "  Pomijam aktualizację WSL distros" -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "  Rozpoczynam aktualizację dystrybucji WSL..." -ForegroundColor Green
+    Write-Host ""
+
     if ($WhatIf) { $r.Actions.Add("[WHATIF] aktualizacja $($distros.Count) dystrybucji WSL"); return }
 
     $r.Actions.Add("WSL distros: $($distros.Count)")
     foreach ($distro in $distros) {
         $r.Counts.Total++
 
+        Write-Host "  Aktualizuję dystrybucję: " -NoNewline -ForegroundColor Gray
+        Write-Host $distro -ForegroundColor Cyan
+
         $updated = $false
 
         # Check if distro has apt (Debian/Ubuntu-based)
         $hasApt = $false
         try {
+            Write-Host "    Wykrywam menedżer pakietów..." -ForegroundColor DarkGray
             $checkApt = @((wsl -d $distro -- which apt) 2>&1)
             if ($LASTEXITCODE -eq 0) { $hasApt = $true }
         } catch {}
 
         if ($hasApt) {
             try {
+                Write-Host "    Menedżer pakietów: " -NoNewline -ForegroundColor Gray
+                Write-Host "apt (Debian/Ubuntu)" -ForegroundColor Yellow
+                Write-Host "    Uruchamiam: apt update && apt upgrade -y" -ForegroundColor Gray
+                Write-Host "    (Podaj hasło sudo gdy zostaniesz poproszony)" -ForegroundColor DarkYellow
+
                 Write-Log "WSL ($distro): apt update && apt upgrade -y"
                 $cmd = "sudo apt update && sudo apt upgrade -y"
                 $outApt = @((wsl -d $distro -- bash -c $cmd) 2>&1)
                 $ecApt = $LASTEXITCODE
                 $outApt | ForEach-Object { Write-Log $_ }
 
-                if ($ecApt -eq 0) { $r.Counts.Ok++ }
-                else { $r.Counts.Fail++; $r.Failures.Add("WSL apt FAIL: $distro (exitCode=$ecApt)") }
+                if ($ecApt -eq 0) {
+                    $r.Counts.Ok++
+                    Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
+                }
+                else {
+                    $r.Counts.Fail++
+                    $r.Failures.Add("WSL apt FAIL: $distro (exitCode=$ecApt)")
+                    Write-Host "    ✗ $distro - błąd (exitCode=$ecApt)" -ForegroundColor Red
+                }
                 $updated = $true
             } catch {
                 $r.Counts.Fail++
                 $r.Failures.Add("WSL apt FAIL: $distro :: $($_.Exception.Message)")
+                Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
                 $updated = $true
             }
         }
@@ -1164,18 +1215,31 @@ $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDis
 
             if ($hasYum) {
                 try {
+                    Write-Host "    Menedżer pakietów: " -NoNewline -ForegroundColor Gray
+                    Write-Host "yum (RHEL/CentOS/Fedora)" -ForegroundColor Yellow
+                    Write-Host "    Uruchamiam: yum update -y" -ForegroundColor Gray
+                    Write-Host "    (Podaj hasło sudo gdy zostaniesz poproszony)" -ForegroundColor DarkYellow
+
                     Write-Log "WSL ($distro): yum update -y"
                     $cmd = "sudo yum update -y"
                     $outYum = @((wsl -d $distro -- bash -c $cmd) 2>&1)
                     $ecYum = $LASTEXITCODE
                     $outYum | ForEach-Object { Write-Log $_ }
 
-                    if ($ecYum -eq 0) { $r.Counts.Ok++ }
-                    else { $r.Counts.Fail++; $r.Failures.Add("WSL yum FAIL: $distro (exitCode=$ecYum)") }
+                    if ($ecYum -eq 0) {
+                        $r.Counts.Ok++
+                        Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
+                    }
+                    else {
+                        $r.Counts.Fail++
+                        $r.Failures.Add("WSL yum FAIL: $distro (exitCode=$ecYum)")
+                        Write-Host "    ✗ $distro - błąd (exitCode=$ecYum)" -ForegroundColor Red
+                    }
                     $updated = $true
                 } catch {
                     $r.Counts.Fail++
                     $r.Failures.Add("WSL yum FAIL: $distro :: $($_.Exception.Message)")
+                    Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
                     $updated = $true
                 }
             }
@@ -1191,18 +1255,31 @@ $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDis
 
             if ($hasPacman) {
                 try {
+                    Write-Host "    Menedżer pakietów: " -NoNewline -ForegroundColor Gray
+                    Write-Host "pacman (Arch Linux)" -ForegroundColor Yellow
+                    Write-Host "    Uruchamiam: pacman -Syu --noconfirm" -ForegroundColor Gray
+                    Write-Host "    (Podaj hasło sudo gdy zostaniesz poproszony)" -ForegroundColor DarkYellow
+
                     Write-Log "WSL ($distro): pacman -Syu --noconfirm"
                     $cmd = "sudo pacman -Syu --noconfirm"
                     $outPacman = @((wsl -d $distro -- bash -c $cmd) 2>&1)
                     $ecPacman = $LASTEXITCODE
                     $outPacman | ForEach-Object { Write-Log $_ }
 
-                    if ($ecPacman -eq 0) { $r.Counts.Ok++ }
-                    else { $r.Counts.Fail++; $r.Failures.Add("WSL pacman FAIL: $distro (exitCode=$ecPacman)") }
+                    if ($ecPacman -eq 0) {
+                        $r.Counts.Ok++
+                        Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
+                    }
+                    else {
+                        $r.Counts.Fail++
+                        $r.Failures.Add("WSL pacman FAIL: $distro (exitCode=$ecPacman)")
+                        Write-Host "    ✗ $distro - błąd (exitCode=$ecPacman)" -ForegroundColor Red
+                    }
                     $updated = $true
                 } catch {
                     $r.Counts.Fail++
                     $r.Failures.Add("WSL pacman FAIL: $distro :: $($_.Exception.Message)")
+                    Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
                     $updated = $true
                 }
             }
@@ -1211,6 +1288,7 @@ $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDis
         if (-not $updated) {
             $r.Notes.Add("WSL: $distro - brak apt/yum/pacman, pomijam")
             Write-Log "WSL: $distro - brak apt/yum/pacman, pomijam" "WARN"
+            Write-Host "    ⊘ $distro - brak obsługiwanego menedżera pakietów (apt/yum/pacman)" -ForegroundColor Yellow
         }
     }
 
