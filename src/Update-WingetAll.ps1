@@ -177,7 +177,13 @@ function Invoke-Step {
 
     $r = New-StepResult -Name $Name
 
+    # Display progress header
+    Write-Host "`n[$Name] " -NoNewline -ForegroundColor Cyan
+    Write-Host "Rozpoczynam..." -ForegroundColor Gray
+
     if ($Skip) {
+        Write-Host "[$Name] " -NoNewline -ForegroundColor Yellow
+        Write-Host "POMINIĘTO (Skip)" -ForegroundColor Yellow
         $r.Notes.Add("Pominięte przełącznikiem Skip.")
         return (Finish-StepResult -R $r -Status "SKIP" -ExitCode 0)
     }
@@ -185,9 +191,26 @@ function Invoke-Step {
     try {
         & $Body $r
         if ($r.Status -eq "PENDING") {
-            return (Finish-StepResult -R $r -Status "OK" -ExitCode 0)
+            $finished = Finish-StepResult -R $r -Status "OK" -ExitCode 0
+            Write-Host "[$Name] " -NoNewline -ForegroundColor Green
+            Write-Host "✓ OK ($($finished.DurationS)s)" -ForegroundColor Green
+            return $finished
         }
-        return (Finish-StepResult -R $r -Status $r.Status -ExitCode ($r.ExitCode ?? 0))
+        $finished = Finish-StepResult -R $r -Status $r.Status -ExitCode ($r.ExitCode ?? 0)
+
+        # Display completion status
+        if ($finished.Status -eq "OK") {
+            Write-Host "[$Name] " -NoNewline -ForegroundColor Green
+            Write-Host "✓ OK ($($finished.DurationS)s)" -ForegroundColor Green
+        } elseif ($finished.Status -eq "SKIP") {
+            Write-Host "[$Name] " -NoNewline -ForegroundColor Yellow
+            Write-Host "⊘ SKIP ($($finished.DurationS)s)" -ForegroundColor Yellow
+        } elseif ($finished.Status -eq "FAIL") {
+            Write-Host "[$Name] " -NoNewline -ForegroundColor Red
+            Write-Host "✗ FAIL ($($finished.DurationS)s)" -ForegroundColor Red
+        }
+
+        return $finished
     } catch {
         $msg = $_.Exception.Message
         $ln = $null
@@ -403,6 +426,17 @@ if (-not (Test-Path -LiteralPath $LogDirectory)) {
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $script:logFile = Join-Path $LogDirectory "dev_update_$timestamp.log"
 
+# Display startup banner
+Write-Host ""
+Write-Host "╔════════════════════════════════════════════════╗" -ForegroundColor Cyan
+Write-Host "║  UPDATE-ULTRA v4.0 - Uniwersalny Updater      ║" -ForegroundColor Cyan
+Write-Host "╚════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Rozpoczynam aktualizację wszystkich środowisk..." -ForegroundColor White
+Write-Host "Log: " -NoNewline -ForegroundColor Gray
+Write-Host $script:logFile -ForegroundColor Yellow
+Write-Host ""
+
 Write-Log "===== START UPDATE (ULTRA v4.0) ====="
 Write-Log "Log: $script:logFile"
 Write-Log "WhatIf: $WhatIf, Force: $Force, IncludeUnknown: $IncludeUnknown"
@@ -430,12 +464,18 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     Write-Log "winget pin list:"
     try { @((winget pin list) 2>&1) | ForEach-Object { Write-Log $_ } } catch {}
 
+    Write-Host "  Sprawdzam dostępne aktualizacje..." -ForegroundColor Gray
     Write-Log "LIST PRZED: winget upgrade"
     $beforeRaw = @()
     [void](Try-Run -Body { winget upgrade } -OutputLines ([ref]$beforeRaw))
 
     $beforeItems = @(Parse-WingetUpgradeList -Lines $beforeRaw)
     $explicitIdsBefore = @(Get-WingetExplicitTargetIds -Lines $beforeRaw)
+
+    Write-Host "  Znaleziono: $($beforeItems.Count) pakietów do aktualizacji" -ForegroundColor Cyan
+    if ($explicitIdsBefore.Count -gt 0) {
+        Write-Host "  Explicit targeting: $($explicitIdsBefore.Count) pakietów" -ForegroundColor Yellow
+    }
 
     $r.Actions.Add("Do aktualizacji (przed): $($beforeItems.Count)")
     if ($explicitIdsBefore.Count -gt 0) {
@@ -445,6 +485,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     if ($WhatIf) {
         $r.Actions.Add("[WHATIF] winget source update")
     } else {
+        Write-Host "  Aktualizuję źródła winget..." -ForegroundColor Gray
         Write-Log "winget source update..."
         @((winget source update) 2>&1) | ForEach-Object { Write-Log $_ }
     }
@@ -452,6 +493,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     if ($WhatIf) {
         $r.Actions.Add("[WHATIF] winget upgrade --id Microsoft.AppInstaller -e")
     } else {
+        Write-Host "  Aktualizuję App Installer..." -ForegroundColor Gray
         Write-Log "Aktualizacja App Installer..."
         $aiLog = Join-Path $LogDirectory ("winget_AppInstaller_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
 
@@ -492,6 +534,8 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         return
     }
 
+    Write-Host "  Uruchamiam winget upgrade --all..." -ForegroundColor Gray
+    Write-Host "  (To może potrwać kilka minut...)" -ForegroundColor DarkGray
     Write-Log "winget $($upgradeArgs -join ' ')"
     $ecAll = Try-Run -Body { winget @upgradeArgs 2>&1 | Tee-Object -FilePath $wingetAllLog } -OutputLines ([ref]$lines)
     $r.ExitCode = $ecAll
@@ -508,6 +552,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
 
     $explicitIds = @(Get-WingetExplicitTargetIds -Lines $lines)
     if ($explicitIds.Count -gt 0) {
+        Write-Host "  Znaleziono $($explicitIds.Count) pakietów wymagających explicit targeting" -ForegroundColor Yellow
         $r.Notes.Add("Require explicit targeting: " + ($explicitIds -join ", "))
     }
 
@@ -534,6 +579,7 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
             continue
         }
 
+        Write-Host "  Aktualizuję explicit: $id..." -ForegroundColor Gray
         Write-Log "EXPLICIT: winget $($args -join ' ')"
         $outX = @(& winget @args 2>&1)
         $ecX  = $LASTEXITCODE
@@ -546,15 +592,18 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         $r.Counts.Total++
         if ($ecX -eq 0) {
             $r.Counts.Ok++
+            Write-Host "    ✓ $id" -ForegroundColor Green
             $r.Actions.Add("EXPLICIT OK: $id")
         }
         else {
             if ($isIgnored) {
                 # Don't count ignored packages as failures
+                Write-Host "    ⊘ $id (ignorowany)" -ForegroundColor Yellow
                 $r.Notes.Add("EXPLICIT IGNORED: $id (exitCode=$ecX, package is in ignore list)")
                 Write-Log "EXPLICIT IGNORED: $id (exitCode=$ecX, in ignore list)" "WARN"
             } else {
                 $r.Counts.Fail++
+                Write-Host "    ✗ $id (błąd: $ecX)" -ForegroundColor Red
                 $r.Failures.Add("EXPLICIT FAIL: $id (exitCode=$ecX) log=$(Resolve-ExistingLogOrNote -Path $singleLog)")
                 # Policy: First non-zero exit code determines the section result.
                 if ($r.ExitCode -eq 0) { $r.ExitCode = $ecX }
