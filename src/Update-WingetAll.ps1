@@ -1,5 +1,12 @@
 <#
-Update-WingetAll.ps1 — ULTRA v4.0
+Update-WingetAll.ps1 — ULTRA v4.1
+
+Nowe w v4.1:
+- Rozszerzona tabela podsumowania z szczegółowymi statystykami
+- Nowe kolumny: Dostępne, Zaktualizowano, Pominięto, Błędy
+- Globalne podsumowanie na końcu (total available/updated/skipped/failed)
+- Interaktywne pytanie przed aktualizacją WSL distros (wymaga sudo)
+- Komunikaty postępu dla WSL distros podczas aktualizacji
 
 Nowe w v4.0:
 - Naprawiono parser winget (nie wyciąga już linii postępu jako pakietów)
@@ -154,7 +161,17 @@ function New-StepResult {
         Notes     = New-Object System.Collections.Generic.List[string]
         Actions   = New-Object System.Collections.Generic.List[string]
         Failures  = New-Object System.Collections.Generic.List[string]
-        Counts    = [ordered]@{ Ok = 0; Fail = 0; Total = 0 }
+        Counts    = [ordered]@{
+            Installed = 0  # Wszystkie zainstalowane pakiety w środowisku
+            Available = 0  # Dostępne aktualizacje (wykryte przed update)
+            Updated   = 0  # Zaktualizowane pomyślnie
+            Skipped   = 0  # Pominięte (ignorowane, user skip, etc.)
+            Failed    = 0  # Błędy aktualizacji
+            # Legacy dla kompatybilności:
+            Ok        = 0
+            Fail      = 0
+            Total     = 0
+        }
         Artifacts = [ordered]@{ }
     }
 }
@@ -429,7 +446,7 @@ $script:logFile = Join-Path $LogDirectory "dev_update_$timestamp.log"
 # Display startup banner
 Write-Host ""
 Write-Host "╔════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║  UPDATE-ULTRA v4.0 - Uniwersalny Updater      ║" -ForegroundColor Cyan
+Write-Host "║  UPDATE-ULTRA v4.1 - Uniwersalny Updater      ║" -ForegroundColor Cyan
 Write-Host "╚════════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Rozpoczynam aktualizację wszystkich środowisk..." -ForegroundColor White
@@ -437,7 +454,7 @@ Write-Host "Log: " -NoNewline -ForegroundColor Gray
 Write-Host $script:logFile -ForegroundColor Yellow
 Write-Host ""
 
-Write-Log "===== START UPDATE (ULTRA v4.0) ====="
+Write-Log "===== START UPDATE (ULTRA v4.1) ====="
 Write-Log "Log: $script:logFile"
 Write-Log "WhatIf: $WhatIf, Force: $Force, IncludeUnknown: $IncludeUnknown"
 
@@ -471,6 +488,9 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
 
     $beforeItems = @(Parse-WingetUpgradeList -Lines $beforeRaw)
     $explicitIdsBefore = @(Get-WingetExplicitTargetIds -Lines $beforeRaw)
+
+    # Statystyki
+    $r.Counts.Available = $beforeItems.Count + $explicitIdsBefore.Count
 
     Write-Host "  Znaleziono: $($beforeItems.Count) pakietów do aktualizacji" -ForegroundColor Cyan
     if ($explicitIdsBefore.Count -gt 0) {
@@ -592,17 +612,20 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         $r.Counts.Total++
         if ($ecX -eq 0) {
             $r.Counts.Ok++
+            $r.Counts.Updated++
             Write-Host "    ✓ $id" -ForegroundColor Green
             $r.Actions.Add("EXPLICIT OK: $id")
         }
         else {
             if ($isIgnored) {
                 # Don't count ignored packages as failures
+                $r.Counts.Skipped++
                 Write-Host "    ⊘ $id (ignorowany)" -ForegroundColor Yellow
                 $r.Notes.Add("EXPLICIT IGNORED: $id (exitCode=$ecX, package is in ignore list)")
                 Write-Log "EXPLICIT IGNORED: $id (exitCode=$ecX, in ignore list)" "WARN"
             } else {
                 $r.Counts.Fail++
+                $r.Counts.Failed++
                 Write-Host "    ✗ $id (błąd: $ecX)" -ForegroundColor Red
                 $r.Failures.Add("EXPLICIT FAIL: $id (exitCode=$ecX) log=$(Resolve-ExistingLogOrNote -Path $singleLog)")
                 # Policy: First non-zero exit code determines the section result.
@@ -644,15 +667,18 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         $r.Counts.Total++
         if ($ecR -eq 0) {
             $r.Counts.Ok++
+            $r.Counts.Updated++
             $r.Actions.Add("RETRY OK: $id")
         }
         else {
             if ($isIgnored) {
                 # Don't count ignored packages as failures
+                $r.Counts.Skipped++
                 $r.Notes.Add("RETRY IGNORED: $id (exitCode=$ecR, package is in ignore list)")
                 Write-Log "RETRY IGNORED: $id (exitCode=$ecR, in ignore list)" "WARN"
             } else {
                 $r.Counts.Fail++
+                $r.Counts.Failed++
                 $r.Failures.Add("RETRY FAIL: $id (exitCode=$ecR) log=$(Resolve-ExistingLogOrNote -Path $retryLog)")
                 if ($r.ExitCode -eq 0) { $r.ExitCode = $ecR }
             }
@@ -726,14 +752,18 @@ $Results.Add((Invoke-Step -Name "Python/Pip" -Skip:$SkipPip -Body {
         }
 
         $r.Actions.Add("pip outdated: $($pkgs.Count) ($t)")
+        $r.Counts.Available += $pkgs.Count
+
         foreach ($p in $pkgs) {
             $r.Counts.Total++
             try {
                 Write-Log "pip upgrade pkg: $($p.name) ($t)"
                 @(& $t -m pip install --upgrade $p.name 2>&1) | ForEach-Object { Write-Log $_ }
                 $r.Counts.Ok++
+                $r.Counts.Updated++
             } catch {
                 $r.Counts.Fail++
+                $r.Counts.Failed++
                 $r.Failures.Add("pip upgrade FAIL: $($p.name) ($t) :: $($_.Exception.Message)")
             }
         }
@@ -776,14 +806,18 @@ $Results.Add((Invoke-Step -Name "PowerShell Modules" -Skip:$SkipPSModules -Body 
     if ($mods.Count -eq 0) { $r.Notes.Add("Brak modułów do aktualizacji."); return }
 
     $r.Actions.Add("Moduły: $($mods.Count)")
+    $r.Counts.Available = $mods.Count
+
     foreach ($m in $mods) {
         $r.Counts.Total++
         try {
             Write-Log "Update-Module: $($m.Name)"
             Update-Module -Name $m.Name -Force -ErrorAction Continue 2>&1 | ForEach-Object { Write-Log $_ }
             $r.Counts.Ok++
+            $r.Counts.Updated++
         } catch {
             $r.Counts.Fail++
+            $r.Counts.Failed++
             $r.Failures.Add("Update-Module FAIL: $($m.Name) :: $($_.Exception.Message)")
         }
     }
@@ -798,6 +832,7 @@ $Results.Add((Invoke-Step -Name "VS Code Extensions" -Skip:$SkipVSCode -Body {
 
     $ext = @((code --list-extensions) 2>&1) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     $r.Actions.Add("Extensions: $($ext.Count)")
+    $r.Counts.Available = $ext.Count
 
     foreach ($e in $ext) {
         $r.Counts.Total++
@@ -805,8 +840,10 @@ $Results.Add((Invoke-Step -Name "VS Code Extensions" -Skip:$SkipVSCode -Body {
             Write-Log "VSCode ext --force: $e"
             @((code --install-extension $e --force) 2>&1) | ForEach-Object { Write-Log $_ }
             $r.Counts.Ok++
+            $r.Counts.Updated++
         } catch {
             $r.Counts.Fail++
+            $r.Counts.Failed++
             $r.Failures.Add("VSCode ext FAIL: $e :: $($_.Exception.Message)")
         }
     }
@@ -899,6 +936,8 @@ $Results.Add((Invoke-Step -Name "Git Repos" -Skip:$SkipGit -Body {
     if ($WhatIf) { $r.Actions.Add("[WHATIF] git pull (repos: $($repos.Count))"); return }
 
     $r.Actions.Add("Repos: $($repos.Count)")
+    $r.Counts.Available = $repos.Count
+
     foreach ($repo in $repos) {
         $r.Counts.Total++
         Push-Location $repo
@@ -907,8 +946,8 @@ $Results.Add((Invoke-Step -Name "Git Repos" -Skip:$SkipGit -Body {
             $outPull = @()
             $ecPull = Try-Run -Body { git pull } -OutputLines ([ref]$outPull)
             $outPull | ForEach-Object { Write-Log $_ }
-            if ($ecPull -eq 0) { $r.Counts.Ok++ }
-            else { $r.Counts.Fail++; $r.Failures.Add("git pull FAIL: $repo (exitCode=$ecPull)") }
+            if ($ecPull -eq 0) { $r.Counts.Ok++; $r.Counts.Updated++ }
+            else { $r.Counts.Fail++; $r.Counts.Failed++; $r.Failures.Add("git pull FAIL: $repo (exitCode=$ecPull)") }
         } finally {
             Pop-Location
         }
@@ -1158,6 +1197,8 @@ $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDis
     if ($WhatIf) { $r.Actions.Add("[WHATIF] aktualizacja $($distros.Count) dystrybucji WSL"); return }
 
     $r.Actions.Add("WSL distros: $($distros.Count)")
+    $r.Counts.Available = $distros.Count
+
     foreach ($distro in $distros) {
         $r.Counts.Total++
 
@@ -1189,16 +1230,19 @@ $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDis
 
                 if ($ecApt -eq 0) {
                     $r.Counts.Ok++
+                    $r.Counts.Updated++
                     Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
                 }
                 else {
                     $r.Counts.Fail++
+                    $r.Counts.Failed++
                     $r.Failures.Add("WSL apt FAIL: $distro (exitCode=$ecApt)")
                     Write-Host "    ✗ $distro - błąd (exitCode=$ecApt)" -ForegroundColor Red
                 }
                 $updated = $true
             } catch {
                 $r.Counts.Fail++
+                $r.Counts.Failed++
                 $r.Failures.Add("WSL apt FAIL: $distro :: $($_.Exception.Message)")
                 Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
                 $updated = $true
@@ -1228,16 +1272,19 @@ $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDis
 
                     if ($ecYum -eq 0) {
                         $r.Counts.Ok++
+                        $r.Counts.Updated++
                         Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
                     }
                     else {
                         $r.Counts.Fail++
+                        $r.Counts.Failed++
                         $r.Failures.Add("WSL yum FAIL: $distro (exitCode=$ecYum)")
                         Write-Host "    ✗ $distro - błąd (exitCode=$ecYum)" -ForegroundColor Red
                     }
                     $updated = $true
                 } catch {
                     $r.Counts.Fail++
+                    $r.Counts.Failed++
                     $r.Failures.Add("WSL yum FAIL: $distro :: $($_.Exception.Message)")
                     Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
                     $updated = $true
@@ -1268,16 +1315,19 @@ $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDis
 
                     if ($ecPacman -eq 0) {
                         $r.Counts.Ok++
+                        $r.Counts.Updated++
                         Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
                     }
                     else {
                         $r.Counts.Fail++
+                        $r.Counts.Failed++
                         $r.Failures.Add("WSL pacman FAIL: $distro (exitCode=$ecPacman)")
                         Write-Host "    ✗ $distro - błąd (exitCode=$ecPacman)" -ForegroundColor Red
                     }
                     $updated = $true
                 } catch {
                     $r.Counts.Fail++
+                    $r.Counts.Failed++
                     $r.Failures.Add("WSL pacman FAIL: $distro :: $($_.Exception.Message)")
                     Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
                     $updated = $true
@@ -1297,20 +1347,41 @@ $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDis
 
 # ----------------- SUMMARY -----------------
 Write-Host ""
-Write-Host "=== PODSUMOWANIE AKTUALIZACJI (ULTRA v4.0) ==="
+Write-Host "=== PODSUMOWANIE AKTUALIZACJI (ULTRA v4.1) ===" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Legenda kolumn:" -ForegroundColor Gray
+Write-Host "  Dostępne     = pakiety z nowszą wersją (wykryte przed aktualizacją)" -ForegroundColor DarkGray
+Write-Host "  Zaktualizowano = pakiety pomyślnie zaktualizowane" -ForegroundColor DarkGray
+Write-Host "  Pominięto    = pakiety pominięte (ignorowane, user skip)" -ForegroundColor DarkGray
+Write-Host "  Błędy        = pakiety z błędem aktualizacji" -ForegroundColor DarkGray
+Write-Host ""
 
 $summary = $Results | ForEach-Object {
     [pscustomobject]@{
-        Sekcja   = $_.Name
-        Status   = $_.Status
-        Czas_s   = $_.DurationS
-        ExitCode = $_.ExitCode
-        OK       = $_.Counts.Ok
-        FAIL     = $_.Counts.Fail
-        Total    = $_.Counts.Total
+        Sekcja         = $_.Name
+        Status         = $_.Status
+        'Czas(s)'      = $_.DurationS
+        Dostępne       = $_.Counts.Available
+        Zaktualizowano = $_.Counts.Updated
+        Pominięto      = $_.Counts.Skipped
+        'Błędy'        = $_.Counts.Failed
     }
 }
 $summary | Format-Table -AutoSize
+
+# Podsumowanie końcowe
+$totalAvailable = ($Results | Measure-Object -Property { $_.Counts.Available } -Sum).Sum
+$totalUpdated = ($Results | Measure-Object -Property { $_.Counts.Updated } -Sum).Sum
+$totalSkipped = ($Results | Measure-Object -Property { $_.Counts.Skipped } -Sum).Sum
+$totalFailed = ($Results | Measure-Object -Property { $_.Counts.Failed } -Sum).Sum
+
+Write-Host ""
+Write-Host "=== PODSUMOWANIE GLOBALNE ===" -ForegroundColor Cyan
+Write-Host ("  Dostępne aktualizacje: {0}" -f $totalAvailable) -ForegroundColor $(if ($totalAvailable -gt 0) { "Yellow" } else { "Gray" })
+Write-Host ("  Zaktualizowano:        {0}" -f $totalUpdated) -ForegroundColor $(if ($totalUpdated -gt 0) { "Green" } else { "Gray" })
+Write-Host ("  Pominięto:             {0}" -f $totalSkipped) -ForegroundColor $(if ($totalSkipped -gt 0) { "Yellow" } else { "Gray" })
+Write-Host ("  Błędy:                 {0}" -f $totalFailed) -ForegroundColor $(if ($totalFailed -gt 0) { "Red" } else { "Gray" })
+Write-Host ""
 
 Write-Host ""
 foreach ($r in $Results) {
@@ -1345,7 +1416,7 @@ try {
 }
 
 Write-Host "Pełny log: $script:logFile"
-Write-Log "===== END UPDATE (ULTRA v4.0) ====="
+Write-Log "===== END UPDATE (ULTRA v4.1) ====="
 
 $overallFail = $Results | Where-Object { $_.Status -eq "FAIL" }
 if ($overallFail) { exit 1 } else { exit 0 }
