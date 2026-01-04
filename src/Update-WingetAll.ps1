@@ -172,8 +172,66 @@ function New-StepResult {
             Fail      = 0
             Total     = 0
         }
+        Packages  = New-Object System.Collections.Generic.List[object]  # Lista pakietów z wersjami
         Artifacts = [ordered]@{ }
     }
+}
+
+function Show-PackageList {
+    param(
+        [string]$SectionName,
+        $Packages,
+        [int]$MaxDisplay = 50
+    )
+
+    if ($Packages.Count -eq 0) { return }
+
+    Write-Host ""
+    Write-Host "  Pakiety w sekcji: " -NoNewline -ForegroundColor Gray
+    Write-Host $SectionName -ForegroundColor Cyan
+    Write-Host "  " -NoNewline
+    Write-Host ("─" * 80) -ForegroundColor DarkGray
+
+    $displayCount = [Math]::Min($Packages.Count, $MaxDisplay)
+
+    foreach ($pkg in ($Packages | Select-Object -First $displayCount)) {
+        $statusSymbol = ""
+        $statusColor = "Gray"
+
+        if ($pkg.Status -eq "Updated") {
+            $statusSymbol = "✓"
+            $statusColor = "Green"
+        } elseif ($pkg.Status -eq "Failed") {
+            $statusSymbol = "✗"
+            $statusColor = "Red"
+        } elseif ($pkg.Status -eq "Skipped") {
+            $statusSymbol = "⊘"
+            $statusColor = "Yellow"
+        } elseif ($pkg.Status -eq "NoChange") {
+            $statusSymbol = "="
+            $statusColor = "Gray"
+        }
+
+        Write-Host "  $statusSymbol " -NoNewline -ForegroundColor $statusColor
+        Write-Host ("{0,-40}" -f $pkg.Name) -NoNewline -ForegroundColor White
+
+        if ($pkg.VersionBefore -and $pkg.VersionAfter -and $pkg.VersionBefore -ne $pkg.VersionAfter) {
+            Write-Host " " -NoNewline
+            Write-Host $pkg.VersionBefore -NoNewline -ForegroundColor DarkGray
+            Write-Host " → " -NoNewline -ForegroundColor Yellow
+            Write-Host $pkg.VersionAfter -ForegroundColor Green
+        } elseif ($pkg.Version) {
+            Write-Host " $($pkg.Version)" -ForegroundColor DarkGray
+        } else {
+            Write-Host ""
+        }
+    }
+
+    if ($Packages.Count -gt $MaxDisplay) {
+        Write-Host "  ... i $($Packages.Count - $MaxDisplay) więcej (pełna lista w logu)" -ForegroundColor DarkGray
+    }
+
+    Write-Host ""
 }
 
 function Finish-StepResult {
@@ -225,6 +283,11 @@ function Invoke-Step {
         } elseif ($finished.Status -eq "FAIL") {
             Write-Host "[$Name] " -NoNewline -ForegroundColor Red
             Write-Host "✗ FAIL ($($finished.DurationS)s)" -ForegroundColor Red
+        }
+
+        # Show package list if available
+        if ($finished.Packages.Count -gt 0) {
+            Show-PackageList -SectionName $Name -Packages $finished.Packages
         }
 
         return $finished
@@ -482,11 +545,22 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     try { @((winget pin list) 2>&1) | ForEach-Object { Write-Log $_ } } catch {}
 
     Write-Host "  Sprawdzam zainstalowane pakiety..." -ForegroundColor Gray
-    Write-Log "LIST: winget list"
+    Write-Log "LIST: winget list --source winget"
     $listRaw = @()
-    [void](Try-Run -Body { winget list } -OutputLines ([ref]$listRaw))
-    $installedItems = @(Parse-WingetUpgradeList -Lines $listRaw)
-    $r.Counts.Installed = $installedItems.Count
+    [void](Try-Run -Body { winget list --source winget } -OutputLines ([ref]$listRaw))
+
+    # Count packages from winget source (skip header/footer lines)
+    $installedCount = 0
+    $inTable = $false
+    foreach ($line in $listRaw) {
+        if ($line -match '^\s*Name\s+Id\s+Version') { $inTable = $true; continue }
+        if ($line -match '^\s*-+\s*$') { continue }
+        if ($inTable -and $line -match '\S+') {
+            $parts = @($line -split '\s{2,}' | Where-Object { $_ -ne "" })
+            if ($parts.Count -ge 3) { $installedCount++ }
+        }
+    }
+    $r.Counts.Installed = $installedCount
 
     Write-Host "  Sprawdzam dostępne aktualizacje..." -ForegroundColor Gray
     Write-Log "LIST PRZED: winget upgrade"
@@ -704,6 +778,26 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         $r.Actions.Add("Require explicit targeting (po): $($explicitIdsAfter.Count) -> " + ($explicitIdsAfter -join ", "))
     }
 
+    # Build package list - compare before and after
+    $allIds = @($beforeItems + $afterItems + $explicitIdsBefore + $explicitIdsAfter | ForEach-Object { $_.Id } | Select-Object -Unique)
+    foreach ($id in $allIds) {
+        $before = $beforeItems | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+        $after = $afterItems | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+        $isIgnored = $WingetIgnoreIds -contains $id
+
+        $status = "NoChange"
+        if ($before -and -not $after) { $status = "Updated" }
+        elseif ($before -and $after -and $before.Version -ne $after.Version) { $status = "Updated" }
+        elseif ($isIgnored) { $status = "Skipped" }
+
+        $r.Packages.Add([pscustomobject]@{
+            Name          = $before.Name ?? $after.Name ?? $id
+            VersionBefore = $before.Version
+            VersionAfter  = if ($status -eq "Updated") { $before.Available } else { $after.Version }
+            Status        = $status
+        })
+    }
+
     $hasFailures = ($r.Failures.Count -gt 0) -or ($r.Counts.Fail -gt 0)
     if ($hasFailures -or $ecAll -ne 0) {
         $r.Status = "FAIL"
@@ -779,10 +873,26 @@ $Results.Add((Invoke-Step -Name "Python/Pip" -Skip:$SkipPip -Body {
                 @(& $t -m pip install --upgrade $p.name 2>&1) | ForEach-Object { Write-Log $_ }
                 $r.Counts.Ok++
                 $r.Counts.Updated++
+
+                # Add to package list
+                $r.Packages.Add([pscustomobject]@{
+                    Name          = $p.name
+                    VersionBefore = $p.version
+                    VersionAfter  = $p.latest_version
+                    Status        = "Updated"
+                })
             } catch {
                 $r.Counts.Fail++
                 $r.Counts.Failed++
                 $r.Failures.Add("pip upgrade FAIL: $($p.name) ($t) :: $($_.Exception.Message)")
+
+                # Add to package list as failed
+                $r.Packages.Add([pscustomobject]@{
+                    Name          = $p.name
+                    VersionBefore = $p.version
+                    VersionAfter  = $null
+                    Status        = "Failed"
+                })
             }
         }
     }
@@ -841,23 +951,46 @@ $Results.Add((Invoke-Step -Name "PowerShell Modules" -Skip:$SkipPSModules -Body 
     }
     if ($WhatIf) { $r.Actions.Add("[WHATIF] Update-Module (all)"); return }
 
-    $mods = @(Get-InstalledModule -ErrorAction SilentlyContinue | Where-Object Name -ne 'Microsoft.WinGet.Client')
+    $allMods = @(Get-InstalledModule -ErrorAction SilentlyContinue)
+    $r.Counts.Installed = $allMods.Count
+
+    $mods = @($allMods | Where-Object Name -ne 'Microsoft.WinGet.Client')
     if ($mods.Count -eq 0) { $r.Notes.Add("Brak modułów do aktualizacji."); return }
 
     $r.Actions.Add("Moduły: $($mods.Count)")
-    $r.Counts.Available = $mods.Count
+    # Note: PowerShell Update-Module doesn't report which modules have updates available
+    # We just try to update all modules, so Available stays 0
 
     foreach ($m in $mods) {
         $r.Counts.Total++
+        $versionBefore = $m.Version
         try {
             Write-Log "Update-Module: $($m.Name)"
             Update-Module -Name $m.Name -Force -ErrorAction Continue 2>&1 | ForEach-Object { Write-Log $_ }
             $r.Counts.Ok++
             $r.Counts.Updated++
+
+            # Get version after update
+            $updatedMod = Get-InstalledModule -Name $m.Name -ErrorAction SilentlyContinue | Select-Object -First 1
+            $versionAfter = $updatedMod.Version ?? $versionBefore
+
+            $r.Packages.Add([pscustomobject]@{
+                Name          = $m.Name
+                VersionBefore = $versionBefore
+                VersionAfter  = $versionAfter
+                Status        = if ($versionBefore -ne $versionAfter) { "Updated" } else { "NoChange" }
+            })
         } catch {
             $r.Counts.Fail++
             $r.Counts.Failed++
             $r.Failures.Add("Update-Module FAIL: $($m.Name) :: $($_.Exception.Message)")
+
+            $r.Packages.Add([pscustomobject]@{
+                Name          = $m.Name
+                VersionBefore = $versionBefore
+                VersionAfter  = $null
+                Status        = "Failed"
+            })
         }
     }
     if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
@@ -870,8 +1003,10 @@ $Results.Add((Invoke-Step -Name "VS Code Extensions" -Skip:$SkipVSCode -Body {
     if ($WhatIf) { $r.Actions.Add("[WHATIF] update extensions"); return }
 
     $ext = @((code --list-extensions) 2>&1) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $r.Counts.Installed = $ext.Count
     $r.Actions.Add("Extensions: $($ext.Count)")
-    $r.Counts.Available = $ext.Count
+    # Note: code --install-extension --force doesn't report which extensions have updates
+    # We just reinstall all extensions, so Available stays 0
 
     foreach ($e in $ext) {
         $r.Counts.Total++
@@ -880,10 +1015,22 @@ $Results.Add((Invoke-Step -Name "VS Code Extensions" -Skip:$SkipVSCode -Body {
             @((code --install-extension $e --force) 2>&1) | ForEach-Object { Write-Log $_ }
             $r.Counts.Ok++
             $r.Counts.Updated++
+
+            $r.Packages.Add([pscustomobject]@{
+                Name    = $e
+                Version = $null  # VS Code CLI doesn't provide version info easily
+                Status  = "Updated"
+            })
         } catch {
             $r.Counts.Fail++
             $r.Counts.Failed++
             $r.Failures.Add("VSCode ext FAIL: $e :: $($_.Exception.Message)")
+
+            $r.Packages.Add([pscustomobject]@{
+                Name    = $e
+                Version = $null
+                Status  = "Failed"
+            })
         }
     }
     if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
@@ -975,8 +1122,9 @@ $Results.Add((Invoke-Step -Name "Git Repos" -Skip:$SkipGit -Body {
 
     if ($WhatIf) { $r.Actions.Add("[WHATIF] git pull (repos: $($repos.Count))"); return }
 
+    $r.Counts.Installed = $repos.Count
     $r.Actions.Add("Repos: $($repos.Count)")
-    $r.Counts.Available = $repos.Count
+    # Note: We don't check which repos have updates before pulling, so Available stays 0
 
     foreach ($repo in $repos) {
         $r.Counts.Total++
@@ -1236,8 +1384,9 @@ $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDis
 
     if ($WhatIf) { $r.Actions.Add("[WHATIF] aktualizacja $($distros.Count) dystrybucji WSL"); return }
 
+    $r.Counts.Installed = $distros.Count
     $r.Actions.Add("WSL distros: $($distros.Count)")
-    $r.Counts.Available = $distros.Count
+    # Note: We don't check which distros have updates before running apt/yum/pacman, so Available stays 0
 
     foreach ($distro in $distros) {
         $r.Counts.Total++
