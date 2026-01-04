@@ -184,10 +184,19 @@ function Show-PackageList {
         [int]$MaxDisplay = 50
     )
 
+    Write-Host "  [DEBUG] Show-PackageList called for: $SectionName" -ForegroundColor DarkGray
+
     # Check if packages exist
-    if (-not $Packages) { return }
+    if (-not $Packages) {
+        Write-Host "  [DEBUG] Packages parameter is null" -ForegroundColor DarkGray
+        return
+    }
     $pkgArray = @($Packages)
-    if ($pkgArray.Count -eq 0) { return }
+    Write-Host "  [DEBUG] Converted to array, count: $($pkgArray.Count)" -ForegroundColor DarkGray
+    if ($pkgArray.Count -eq 0) {
+        Write-Host "  [DEBUG] Array count is 0, returning" -ForegroundColor DarkGray
+        return
+    }
 
     Write-Host ""
     Write-Host "  Pakiety w sekcji: " -NoNewline -ForegroundColor Gray
@@ -290,14 +299,22 @@ function Invoke-Step {
 
         # Show package list if available
         try {
+            Write-Host "  [DEBUG] Packages object type: $($finished.Packages.GetType().Name)" -ForegroundColor DarkGray
             if ($finished.Packages) {
                 $pkgCount = @($finished.Packages).Count
+                Write-Host "  [DEBUG] Package count: $pkgCount" -ForegroundColor DarkGray
                 if ($pkgCount -gt 0) {
+                    Write-Host "  [DEBUG] Calling Show-PackageList..." -ForegroundColor DarkGray
                     Show-PackageList -SectionName $Name -Packages $finished.Packages
+                } else {
+                    Write-Host "  [DEBUG] Package count is 0, skipping list display" -ForegroundColor DarkGray
                 }
+            } else {
+                Write-Host "  [DEBUG] Packages object is null/empty" -ForegroundColor DarkGray
             }
         } catch {
-            # Ignore errors in package list display
+            # Show errors in package list display
+            Write-Host "  [DEBUG] Error displaying package list: $($_.Exception.Message)" -ForegroundColor Red
             Write-Log "Nie można wyświetlić listy pakietów: $($_.Exception.Message)" "WARN"
         }
 
@@ -816,6 +833,8 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         })
     }
 
+    Write-Log "[DEBUG] Winget section complete. Total packages in list: $($r.Packages.Count)"
+
     $hasFailures = ($r.Failures.Count -gt 0) -or ($r.Counts.Fail -gt 0)
     if ($hasFailures -or $ecAll -ne 0) {
         $r.Status = "FAIL"
@@ -899,6 +918,7 @@ $Results.Add((Invoke-Step -Name "Python/Pip" -Skip:$SkipPip -Body {
                     VersionAfter  = $p.latest_version
                     Status        = "Updated"
                 })
+                Write-Log "[DEBUG] Added package to list: $($p.name) $($p.version) → $($p.latest_version)"
             } catch {
                 $r.Counts.Fail++
                 $r.Counts.Failed++
@@ -915,6 +935,7 @@ $Results.Add((Invoke-Step -Name "Python/Pip" -Skip:$SkipPip -Body {
         }
     }
 
+    Write-Log "[DEBUG] Python/Pip section complete. Total packages in list: $($r.Packages.Count)"
     if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
 }))
 
@@ -998,6 +1019,7 @@ $Results.Add((Invoke-Step -Name "PowerShell Modules" -Skip:$SkipPSModules -Body 
                 VersionAfter  = $versionAfter
                 Status        = if ($versionBefore -ne $versionAfter) { "Updated" } else { "NoChange" }
             })
+            Write-Log "[DEBUG] Added PS module to list: $($m.Name) $versionBefore → $versionAfter"
         } catch {
             $r.Counts.Fail++
             $r.Counts.Failed++
@@ -1011,6 +1033,7 @@ $Results.Add((Invoke-Step -Name "PowerShell Modules" -Skip:$SkipPSModules -Body 
             })
         }
     }
+    Write-Log "[DEBUG] PowerShell Modules section complete. Total packages in list: $($r.Packages.Count)"
     if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
 }))
 
@@ -1039,6 +1062,7 @@ $Results.Add((Invoke-Step -Name "VS Code Extensions" -Skip:$SkipVSCode -Body {
                 Version = $null  # VS Code CLI doesn't provide version info easily
                 Status  = "Updated"
             })
+            Write-Log "[DEBUG] Added VS Code extension to list: $e"
         } catch {
             $r.Counts.Fail++
             $r.Counts.Failed++
@@ -1051,6 +1075,7 @@ $Results.Add((Invoke-Step -Name "VS Code Extensions" -Skip:$SkipVSCode -Body {
             })
         }
     }
+    Write-Log "[DEBUG] VS Code Extensions section complete. Total packages in list: $($r.Packages.Count)"
     if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
 }))
 
