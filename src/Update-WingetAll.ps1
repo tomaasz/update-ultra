@@ -481,6 +481,13 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     Write-Log "winget pin list:"
     try { @((winget pin list) 2>&1) | ForEach-Object { Write-Log $_ } } catch {}
 
+    Write-Host "  Sprawdzam zainstalowane pakiety..." -ForegroundColor Gray
+    Write-Log "LIST: winget list"
+    $listRaw = @()
+    [void](Try-Run -Body { winget list } -OutputLines ([ref]$listRaw))
+    $installedItems = @(Parse-WingetUpgradeList -Lines $listRaw)
+    $r.Counts.Installed = $installedItems.Count
+
     Write-Host "  Sprawdzam dostępne aktualizacje..." -ForegroundColor Gray
     Write-Log "LIST PRZED: winget upgrade"
     $beforeRaw = @()
@@ -492,7 +499,8 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     # Statystyki
     $r.Counts.Available = $beforeItems.Count + $explicitIdsBefore.Count
 
-    Write-Host "  Znaleziono: $($beforeItems.Count) pakietów do aktualizacji" -ForegroundColor Cyan
+    Write-Host "  Zainstalowane pakiety: $($r.Counts.Installed)" -ForegroundColor Gray
+    Write-Host "  Dostępne aktualizacje: $($r.Counts.Available)" -ForegroundColor Cyan
     if ($explicitIdsBefore.Count -gt 0) {
         Write-Host "  Explicit targeting: $($explicitIdsBefore.Count) pakietów" -ForegroundColor Yellow
     }
@@ -734,6 +742,16 @@ $Results.Add((Invoke-Step -Name "Python/Pip" -Skip:$SkipPip -Body {
             continue
         }
 
+        # Get all installed packages
+        $allPkgs = @()
+        [void](Try-Run -Body { & $t -m pip list --format=json } -OutputLines ([ref]$allPkgs))
+        $allJoined = (($allPkgs -join "`n").Trim())
+        $allPkgsList = @()
+        if ($allJoined -and $allJoined.StartsWith("[")) {
+            try { $allPkgsList = @($allJoined | ConvertFrom-Json) } catch { $allPkgsList = @() }
+        }
+        $r.Counts.Installed += $allPkgsList.Count
+
         $outdated = @()
         [void](Try-Run -Body { & $t -m pip list --outdated --format=json } -OutputLines ([ref]$outdated))
         $joined = (($outdated -join "`n").Trim())
@@ -751,7 +769,7 @@ $Results.Add((Invoke-Step -Name "Python/Pip" -Skip:$SkipPip -Body {
             continue
         }
 
-        $r.Actions.Add("pip outdated: $($pkgs.Count) ($t)")
+        $r.Actions.Add("pip: $($allPkgsList.Count) installed, $($pkgs.Count) outdated ($t)")
         $r.Counts.Available += $pkgs.Count
 
         foreach ($p in $pkgs) {
@@ -776,6 +794,17 @@ $Results.Add((Invoke-Step -Name "Python/Pip" -Skip:$SkipPip -Body {
 $Results.Add((Invoke-Step -Name "npm (global)" -Skip:$SkipNpm -Body {
     param($r)
     if (-not (Test-CommandExists "npm")) { $r.Status="SKIP"; $r.Notes.Add("npm brak w PATH."); return }
+
+    # Get installed global packages
+    try {
+        $npmList = @((npm list -g --depth=0 --json 2>$null) | ConvertFrom-Json)
+        if ($npmList.dependencies) {
+            $r.Counts.Installed = ($npmList.dependencies | Get-Member -MemberType NoteProperty).Count
+        }
+    } catch {
+        Write-Log "Nie można pobrać listy npm packages: $($_.Exception.Message)" "WARN"
+    }
+
     if ($WhatIf) { $r.Actions.Add("[WHATIF] npm -g update"); return }
     Write-Log "npm -g update..."
     @((npm -g update) 2>&1) | ForEach-Object { Write-Log $_ }
@@ -785,6 +814,16 @@ $Results.Add((Invoke-Step -Name "npm (global)" -Skip:$SkipNpm -Body {
 $Results.Add((Invoke-Step -Name "Chocolatey" -Skip:$SkipChoco -Body {
     param($r)
     if (-not (Test-CommandExists "choco")) { $r.Status="SKIP"; $r.Notes.Add("choco brak w PATH."); return }
+
+    # Get installed packages
+    try {
+        $chocoList = @((choco list --local-only) 2>&1)
+        $pkgCount = ($chocoList | Where-Object { $_ -match '^\S+\s+\d' }).Count
+        $r.Counts.Installed = $pkgCount
+    } catch {
+        Write-Log "Nie można pobrać listy choco packages: $($_.Exception.Message)" "WARN"
+    }
+
     if ($WhatIf) { $r.Actions.Add("[WHATIF] choco upgrade all -y"); return }
     Write-Log "choco upgrade all -y..."
     $out = @((choco upgrade all -y) 2>&1)
@@ -892,6 +931,7 @@ $Results.Add((Invoke-Step -Name "Docker Images" -Skip:$SkipDocker -Body {
 
     if ($images.Count -eq 0) { $r.Notes.Add("Brak obrazów do aktualizacji (albo nie spełniają formatu repo:tag)."); return }
 
+    $r.Counts.Installed = $images.Count
     $r.Actions.Add("Images: $($images.Count)")
     foreach ($img in $images) {
         $r.Counts.Total++
@@ -1350,10 +1390,11 @@ Write-Host ""
 Write-Host "=== PODSUMOWANIE AKTUALIZACJI (ULTRA v4.1) ===" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Legenda kolumn:" -ForegroundColor Gray
-Write-Host "  Dostępne     = pakiety z nowszą wersją (wykryte przed aktualizacją)" -ForegroundColor DarkGray
+Write-Host "  Zainstalowane = wszystkie pakiety w środowisku" -ForegroundColor DarkGray
+Write-Host "  Dostępne      = pakiety z nowszą wersją (wykryte przed aktualizacją)" -ForegroundColor DarkGray
 Write-Host "  Zaktualizowano = pakiety pomyślnie zaktualizowane" -ForegroundColor DarkGray
-Write-Host "  Pominięto    = pakiety pominięte (ignorowane, user skip)" -ForegroundColor DarkGray
-Write-Host "  Błędy        = pakiety z błędem aktualizacji" -ForegroundColor DarkGray
+Write-Host "  Pominięto     = pakiety pominięte (ignorowane, user skip)" -ForegroundColor DarkGray
+Write-Host "  Błędy         = pakiety z błędem aktualizacji" -ForegroundColor DarkGray
 Write-Host ""
 
 $summary = $Results | ForEach-Object {
@@ -1361,6 +1402,7 @@ $summary = $Results | ForEach-Object {
         Sekcja         = $_.Name
         Status         = $_.Status
         'Czas(s)'      = $_.DurationS
+        Zainstalowane  = $_.Counts.Installed
         Dostępne       = $_.Counts.Available
         Zaktualizowano = $_.Counts.Updated
         Pominięto      = $_.Counts.Skipped
@@ -1370,6 +1412,7 @@ $summary = $Results | ForEach-Object {
 $summary | Format-Table -AutoSize
 
 # Podsumowanie końcowe
+$totalInstalled = ($Results | Measure-Object -Property { $_.Counts.Installed } -Sum).Sum
 $totalAvailable = ($Results | Measure-Object -Property { $_.Counts.Available } -Sum).Sum
 $totalUpdated = ($Results | Measure-Object -Property { $_.Counts.Updated } -Sum).Sum
 $totalSkipped = ($Results | Measure-Object -Property { $_.Counts.Skipped } -Sum).Sum
@@ -1377,6 +1420,7 @@ $totalFailed = ($Results | Measure-Object -Property { $_.Counts.Failed } -Sum).S
 
 Write-Host ""
 Write-Host "=== PODSUMOWANIE GLOBALNE ===" -ForegroundColor Cyan
+Write-Host ("  Zainstalowane pakiety: {0}" -f $totalInstalled) -ForegroundColor $(if ($totalInstalled -gt 0) { "Cyan" } else { "Gray" })
 Write-Host ("  Dostępne aktualizacje: {0}" -f $totalAvailable) -ForegroundColor $(if ($totalAvailable -gt 0) { "Yellow" } else { "Gray" })
 Write-Host ("  Zaktualizowano:        {0}" -f $totalUpdated) -ForegroundColor $(if ($totalUpdated -gt 0) { "Green" } else { "Gray" })
 Write-Host ("  Pominięto:             {0}" -f $totalSkipped) -ForegroundColor $(if ($totalSkipped -gt 0) { "Yellow" } else { "Gray" })
@@ -1409,13 +1453,20 @@ $summaryObj = [pscustomobject]@{
 $summaryJsonPath = Join-Path $LogDirectory ("dev_update_{0}_summary.json" -f $timestamp)
 try {
     $summaryObj | ConvertTo-Json -Depth 12 | Set-Content -Path $summaryJsonPath -Encoding UTF8
-    Write-Host "Summary JSON: $summaryJsonPath"
+    Write-Host ""
+    Write-Host "Pliki wynikowe:" -ForegroundColor Cyan
+    Write-Host "  Summary JSON: " -NoNewline -ForegroundColor Gray
+    Write-Host $summaryJsonPath -ForegroundColor Yellow
+    Write-Host "  Pełny log:    " -NoNewline -ForegroundColor Gray
+    Write-Host $script:logFile -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Tip: " -NoNewline -ForegroundColor DarkGray
+    Write-Host "Szczegółowe listy pakietów znajdziesz w logach i summary JSON" -ForegroundColor DarkGray
     Write-Log "Summary JSON: $summaryJsonPath"
 } catch {
     Write-Log "Nie udało się zapisać summary JSON: $($_.Exception.Message)" "WARN"
+    Write-Host "Pełny log: $script:logFile"
 }
-
-Write-Host "Pełny log: $script:logFile"
 Write-Log "===== END UPDATE (ULTRA v4.1) ====="
 
 $overallFail = $Results | Where-Object { $_.Status -eq "FAIL" }
