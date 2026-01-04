@@ -289,8 +289,16 @@ function Invoke-Step {
         }
 
         # Show package list if available
-        if ($finished.Packages -and @($finished.Packages).Count -gt 0) {
-            Show-PackageList -SectionName $Name -Packages $finished.Packages
+        try {
+            if ($finished.Packages) {
+                $pkgCount = @($finished.Packages).Count
+                if ($pkgCount -gt 0) {
+                    Show-PackageList -SectionName $Name -Packages $finished.Packages
+                }
+            }
+        } catch {
+            # Ignore errors in package list display
+            Write-Log "Nie można wyświetlić listy pakietów: $($_.Exception.Message)" "WARN"
         }
 
         return $finished
@@ -796,10 +804,14 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
         elseif ($before -and $after -and $before.Version -ne $after.Version) { $status = "Updated" }
         elseif ($isIgnored) { $status = "Skipped" }
 
+        $pkgName = $id
+        if ($before -and $before.Name) { $pkgName = $before.Name }
+        elseif ($after -and $after.Name) { $pkgName = $after.Name }
+
         $r.Packages.Add([pscustomobject]@{
-            Name          = $before.Name ?? $after.Name ?? $id
-            VersionBefore = $before.Version
-            VersionAfter  = if ($status -eq "Updated") { $before.Available } else { $after.Version }
+            Name          = $pkgName
+            VersionBefore = if ($before) { $before.Version } else { $null }
+            VersionAfter  = if ($status -eq "Updated") { if ($before) { $before.Available } else { $null } } else { if ($after) { $after.Version } else { $null } }
             Status        = $status
         })
     }
@@ -978,7 +990,7 @@ $Results.Add((Invoke-Step -Name "PowerShell Modules" -Skip:$SkipPSModules -Body 
 
             # Get version after update
             $updatedMod = Get-InstalledModule -Name $m.Name -ErrorAction SilentlyContinue | Select-Object -First 1
-            $versionAfter = $updatedMod.Version ?? $versionBefore
+            $versionAfter = if ($updatedMod -and $updatedMod.Version) { $updatedMod.Version } else { $versionBefore }
 
             $r.Packages.Add([pscustomobject]@{
                 Name          = $m.Name
