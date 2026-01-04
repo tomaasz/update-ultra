@@ -184,7 +184,10 @@ function Show-PackageList {
         [int]$MaxDisplay = 50
     )
 
-    if ($Packages.Count -eq 0) { return }
+    # Check if packages exist
+    if (-not $Packages) { return }
+    $pkgArray = @($Packages)
+    if ($pkgArray.Count -eq 0) { return }
 
     Write-Host ""
     Write-Host "  Pakiety w sekcji: " -NoNewline -ForegroundColor Gray
@@ -192,9 +195,9 @@ function Show-PackageList {
     Write-Host "  " -NoNewline
     Write-Host ("─" * 80) -ForegroundColor DarkGray
 
-    $displayCount = [Math]::Min($Packages.Count, $MaxDisplay)
+    $displayCount = [Math]::Min($pkgArray.Count, $MaxDisplay)
 
-    foreach ($pkg in ($Packages | Select-Object -First $displayCount)) {
+    foreach ($pkg in ($pkgArray | Select-Object -First $displayCount)) {
         $statusSymbol = ""
         $statusColor = "Gray"
 
@@ -227,8 +230,8 @@ function Show-PackageList {
         }
     }
 
-    if ($Packages.Count -gt $MaxDisplay) {
-        Write-Host "  ... i $($Packages.Count - $MaxDisplay) więcej (pełna lista w logu)" -ForegroundColor DarkGray
+    if ($pkgArray.Count -gt $MaxDisplay) {
+        Write-Host "  ... i $($pkgArray.Count - $MaxDisplay) więcej (pełna lista w logu)" -ForegroundColor DarkGray
     }
 
     Write-Host ""
@@ -265,13 +268,13 @@ function Invoke-Step {
 
     try {
         & $Body $r
+
+        # Finish step and determine status
         if ($r.Status -eq "PENDING") {
             $finished = Finish-StepResult -R $r -Status "OK" -ExitCode 0
-            Write-Host "[$Name] " -NoNewline -ForegroundColor Green
-            Write-Host "✓ OK ($($finished.DurationS)s)" -ForegroundColor Green
-            return $finished
+        } else {
+            $finished = Finish-StepResult -R $r -Status $r.Status -ExitCode ($r.ExitCode ?? 0)
         }
-        $finished = Finish-StepResult -R $r -Status $r.Status -ExitCode ($r.ExitCode ?? 0)
 
         # Display completion status
         if ($finished.Status -eq "OK") {
@@ -286,7 +289,7 @@ function Invoke-Step {
         }
 
         # Show package list if available
-        if ($finished.Packages.Count -gt 0) {
+        if ($finished.Packages -and @($finished.Packages).Count -gt 0) {
             Show-PackageList -SectionName $Name -Packages $finished.Packages
         }
 
@@ -779,7 +782,10 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
     }
 
     # Build package list - compare before and after
-    $allIds = @($beforeItems + $afterItems + $explicitIdsBefore + $explicitIdsAfter | ForEach-Object { $_.Id } | Select-Object -Unique)
+    $allItemIds = @($beforeItems + $afterItems | ForEach-Object { $_.Id })
+    $allExplicitIds = @($explicitIdsBefore + $explicitIdsAfter)
+    $allIds = @($allItemIds + $allExplicitIds | Select-Object -Unique)
+
     foreach ($id in $allIds) {
         $before = $beforeItems | Where-Object { $_.Id -eq $id } | Select-Object -First 1
         $after = $afterItems | Where-Object { $_.Id -eq $id } | Select-Object -First 1
