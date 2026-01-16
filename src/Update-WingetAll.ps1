@@ -1,5 +1,10 @@
 <#
-Update-WingetAll.ps1 — ULTRA v4.1
+Update-WingetAll.ps1 — ULTRA v4.2
+
+Nowe w v4.2:
+- FIX: Ignorowanie błędu git merge (workaround dla ocr-stare-dokumenty)
+- FIX: Poprawa widoczności monitu o hasło sudo w WSL (Start-Process)
+- FIX: Winget explicit targeting zaktualizowany (usunięcie zbędnego przecinka)
 
 Nowe w v4.1:
 - Rozszerzona tabela podsumowania z szczegółowymi statystykami
@@ -58,20 +63,24 @@ try {
     $global:OutputEncoding = [System.Text.UTF8Encoding]::new($false)
     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
     chcp 65001 | Out-Null
-} catch {}
+}
+catch {}
 
 # ----------------- CONFIG -----------------
-$PythonInterpreters  = @() # empty = auto
+$PythonInterpreters = @() # empty = auto
 $PythonVenvRootPaths = @("C:\venv", "$env:USERPROFILE\.virtualenvs")
-$PythonVenvExplicit  = @()
+$PythonVenvExplicit = @()
 
 $WingetRetryIds = @("Notepad++.Notepad++")
 $WingetIgnoreIds = @("Discord.Discord") # Packages to ignore failures (e.g., pinned packages that auto-update)
 
 $DockerImagesToUpdate = @() # empty = update all local images
 
-$GitRepos     = @()
+$GitRepos = @()
+$GitRepos = @()
 $GitRootPaths = @("C:\Dev")
+$GitIgnorePaths = @("C:\Dev\ocr-stare-dokumenty") # Repos to skip updates
+
 
 # Go tools to update (empty = skip)
 $GoTools = @()
@@ -86,7 +95,7 @@ $WSLDistros = @()
 function As-Array {
     param($x)
     if ($null -eq $x) { return @() }
-    return @((,$x))   # unary comma => never unroll
+    return @((, $x))   # unary comma => never unroll
 }
 function SafeCount {
     param($x)
@@ -142,7 +151,7 @@ function Resolve-ExistingLogOrNote {
 function Write-Log {
     param(
         [string]$Message,
-        [ValidateSet('INFO','WARN','ERROR')]
+        [ValidateSet('INFO', 'WARN', 'ERROR')]
         [string]$Level = 'INFO'
     )
     $line = "[{0:yyyy-MM-dd HH:mm:ss}] [{1}] {2}" -f (Get-Date), $Level, $Message
@@ -191,35 +200,45 @@ function Show-PackageList {
         Write-Host "  [DEBUG] Packages parameter is null" -ForegroundColor DarkGray
         return
     }
-    $pkgArray = @($Packages)
-    Write-Host "  [DEBUG] Converted to array, count: $($pkgArray.Count)" -ForegroundColor DarkGray
+    
+    # Fix array conversion for List<object>
+    $pkgArray = $Packages
+    if ($Packages -isnot [System.Collections.IList]) {
+        $pkgArray = @($Packages)
+    }
+
     if ($pkgArray.Count -eq 0) {
-        Write-Host "  [DEBUG] Array count is 0, returning" -ForegroundColor DarkGray
         return
     }
 
+    # Normalize objects to ensure all properties exist (StrictMode fix)
+    $normalizedPkgs = $pkgArray | Select-Object -Property Name, Status, Version, VersionBefore, VersionAfter
+    
     Write-Host ""
     Write-Host "  Pakiety w sekcji: " -NoNewline -ForegroundColor Gray
     Write-Host $SectionName -ForegroundColor Cyan
     Write-Host "  " -NoNewline
     Write-Host ("─" * 80) -ForegroundColor DarkGray
 
-    $displayCount = [Math]::Min($pkgArray.Count, $MaxDisplay)
+    $displayCount = [Math]::Min($normalizedPkgs.Count, $MaxDisplay)
 
-    foreach ($pkg in ($pkgArray | Select-Object -First $displayCount)) {
+    foreach ($pkg in ($normalizedPkgs | Select-Object -First $displayCount)) {
         $statusSymbol = ""
         $statusColor = "Gray"
 
         if ($pkg.Status -eq "Updated") {
             $statusSymbol = "✓"
             $statusColor = "Green"
-        } elseif ($pkg.Status -eq "Failed") {
+        }
+        elseif ($pkg.Status -eq "Failed") {
             $statusSymbol = "✗"
             $statusColor = "Red"
-        } elseif ($pkg.Status -eq "Skipped") {
+        }
+        elseif ($pkg.Status -eq "Skipped") {
             $statusSymbol = "⊘"
             $statusColor = "Yellow"
-        } elseif ($pkg.Status -eq "NoChange") {
+        }
+        elseif ($pkg.Status -eq "NoChange") {
             $statusSymbol = "="
             $statusColor = "Gray"
         }
@@ -232,9 +251,11 @@ function Show-PackageList {
             Write-Host $pkg.VersionBefore -NoNewline -ForegroundColor DarkGray
             Write-Host " → " -NoNewline -ForegroundColor Yellow
             Write-Host $pkg.VersionAfter -ForegroundColor Green
-        } elseif ($pkg.Version) {
+        }
+        elseif ($pkg.Version) {
             Write-Host " $($pkg.Version)" -ForegroundColor DarkGray
-        } else {
+        }
+        else {
             Write-Host ""
         }
     }
@@ -281,7 +302,8 @@ function Invoke-Step {
         # Finish step and determine status
         if ($r.Status -eq "PENDING") {
             $finished = Finish-StepResult -R $r -Status "OK" -ExitCode 0
-        } else {
+        }
+        else {
             $finished = Finish-StepResult -R $r -Status $r.Status -ExitCode ($r.ExitCode ?? 0)
         }
 
@@ -289,55 +311,60 @@ function Invoke-Step {
         if ($finished.Status -eq "OK") {
             Write-Host "[$Name] " -NoNewline -ForegroundColor Green
             Write-Host "✓ OK ($($finished.DurationS)s)" -ForegroundColor Green
-        } elseif ($finished.Status -eq "SKIP") {
+        }
+        elseif ($finished.Status -eq "SKIP") {
             Write-Host "[$Name] " -NoNewline -ForegroundColor Yellow
             Write-Host "⊘ SKIP ($($finished.DurationS)s)" -ForegroundColor Yellow
-        } elseif ($finished.Status -eq "FAIL") {
+        }
+        elseif ($finished.Status -eq "FAIL") {
             Write-Host "[$Name] " -NoNewline -ForegroundColor Red
             Write-Host "✗ FAIL ($($finished.DurationS)s)" -ForegroundColor Red
         }
 
         # Show package list if available
+        # Show package list if available
         try {
-            Write-Host "  [DEBUG] Packages object type: $($finished.Packages.GetType().Name)" -ForegroundColor DarkGray
             if ($finished.Packages) {
-                $pkgCount = @($finished.Packages).Count
-                Write-Host "  [DEBUG] Package count: $pkgCount" -ForegroundColor DarkGray
-                if ($pkgCount -gt 0) {
-                    Write-Host "  [DEBUG] Calling Show-PackageList..." -ForegroundColor DarkGray
-                    Show-PackageList -SectionName $Name -Packages $finished.Packages
-                } else {
-                    Write-Host "  [DEBUG] Package count is 0, skipping list display" -ForegroundColor DarkGray
+                $pkgCount = 0
+                if ($finished.Packages.PSObject.Properties['Count']) {
+                    $pkgCount = $finished.Packages.Count
                 }
-            } else {
-                Write-Host "  [DEBUG] Packages object is null/empty" -ForegroundColor DarkGray
+                else {
+                    $pkgCount = @($finished.Packages).Count
+                }
+                
+                if ($pkgCount -gt 0) {
+                    Show-PackageList -SectionName $Name -Packages $finished.Packages
+                }
             }
-        } catch {
-            # Show errors in package list display
+        }
+        catch {
             Write-Host "  [DEBUG] Error displaying package list: $($_.Exception.Message)" -ForegroundColor Red
             Write-Log "Nie można wyświetlić listy pakietów: $($_.Exception.Message)" "WARN"
         }
 
         return $finished
-    } catch {
+    }
+    catch {
         $msg = $_.Exception.Message
         $ln = $null
         $line = $null
         $pos = $null
         try {
-            $ln   = $_.InvocationInfo.ScriptLineNumber
+            $ln = $_.InvocationInfo.ScriptLineNumber
             $line = $_.InvocationInfo.Line
-            $pos  = $_.InvocationInfo.PositionMessage
-        } catch {}
+            $pos = $_.InvocationInfo.PositionMessage
+        }
+        catch {}
 
         $r.Failures.Add("Wyjątek: $msg")
-        if ($ln)   { $r.Failures.Add("Linia: $ln") }
+        if ($ln) { $r.Failures.Add("Linia: $ln") }
         if ($line) { $r.Failures.Add("Kod: $line") }
 
         Write-Log "[$Name] WYJĄTEK: $msg" "ERROR"
-        if ($ln)   { Write-Log "[$Name] LINIA: $ln" "ERROR" }
+        if ($ln) { Write-Log "[$Name] LINIA: $ln" "ERROR" }
         if ($line) { Write-Log "[$Name] KOD: $line" "ERROR" }
-        if ($pos)  { Write-Log "[$Name] POS: $pos" "ERROR" }
+        if ($pos) { Write-Log "[$Name] POS: $pos" "ERROR" }
 
         return (Finish-StepResult -R $r -Status "FAIL" -ExitCode 1)
     }
@@ -352,7 +379,8 @@ function Try-Run {
     try {
         $OutputLines.Value = @(& $Body 2>&1)
         return $LASTEXITCODE
-    } catch {
+    }
+    catch {
         $OutputLines.Value = @("EXCEPTION: $($_.Exception.Message)")
         return 1
     }
@@ -378,12 +406,12 @@ function Parse-WingetUpgradeList {
 
         if ($parts.Count -ge 5) {
             $items.Add([pscustomobject]@{
-                Name      = $parts[0]
-                Id        = $parts[1]
-                Version   = $parts[2]
-                Available = $parts[3]
-                Source    = $parts[4]
-            }) | Out-Null
+                    Name      = $parts[0]
+                    Id        = $parts[1]
+                    Version   = $parts[2]
+                    Available = $parts[3]
+                    Source    = $parts[4]
+                }) | Out-Null
         }
     }
 
@@ -429,7 +457,7 @@ function Get-WingetExplicitTargetIds {
 
     # Ensure we always return an array (use unary comma to prevent PowerShell from unrolling single-item arrays)
     $result = @($ids.ToArray() | Select-Object -Unique)
-    return ,$result
+    return $result
 }
 
 function Get-WingetRunningBlockers {
@@ -442,7 +470,7 @@ function Get-WingetRunningBlockers {
         $l = [string]$raw
 
         if ($l -match 'Found\s+(.+?)\s+\[(.+?)\]') {
-            $lastFound = [pscustomobject]@{ Name=$Matches[1].Trim(); Id=$Matches[2].Trim() }
+            $lastFound = [pscustomobject]@{ Name = $Matches[1].Trim(); Id = $Matches[2].Trim() }
         }
         if ($l -match 'Application is currently running') {
             if ($null -ne $lastFound) { $blockers.Add($lastFound) | Out-Null }
@@ -466,7 +494,8 @@ function Get-PythonTargets {
         foreach ($name in (As-Array $InterpretersConfig)) {
             if (Test-CommandExists $name) { $targets.Add($name) | Out-Null }
         }
-    } else {
+    }
+    else {
         if (Test-CommandExists "py") {
             Write-Log "Auto-wykrywanie interpreterów Pythona przez 'py -0p'..."
             try {
@@ -477,19 +506,21 @@ function Get-PythonTargets {
                         if (Test-Path $path) { $targets.Add($path) | Out-Null }
                     }
                 }
-            } catch {
+            }
+            catch {
                 Write-Log "Błąd 'py -0p': $($_.Exception.Message)" "WARN"
             }
         }
 
-        foreach ($name in @("python","python3")) {
+        foreach ($name in @("python", "python3")) {
             if (Test-CommandExists $name) {
                 try {
                     & $name --version *> $null
                     if ($LASTEXITCODE -eq 0) {
                         $targets.Add($name) | Out-Null
                     }
-                } catch {
+                }
+                catch {
                     # Ignorujemy błędy uruchamiania (np. alias do Store, brak faktycznego pliku)
                 }
             }
@@ -503,11 +534,12 @@ function Get-PythonTargets {
         }
         try {
             Get-ChildItem -Path $root -Directory -Recurse -Depth 3 -ErrorAction SilentlyContinue |
-                ForEach-Object {
-                    $pyPath = Join-Path $_.FullName "Scripts\python.exe"
-                    if (Test-Path $pyPath) { $targets.Add($pyPath) | Out-Null }
-                }
-        } catch {
+            ForEach-Object {
+                $pyPath = Join-Path $_.FullName "Scripts\python.exe"
+                if (Test-Path $pyPath) { $targets.Add($pyPath) | Out-Null }
+            }
+        }
+        catch {
             Write-Log "Błąd skanowania venv root '$root': $($_.Exception.Message)" "WARN"
         }
     }
@@ -520,7 +552,7 @@ function Get-PythonTargets {
 }
 
 # ----------------- ADMIN CHECK -----------------
-$identity  = [Security.Principal.WindowsIdentity]::GetCurrent()
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Warning "Ten skrypt musi być uruchomiony jako Administrator."
@@ -537,7 +569,7 @@ $script:logFile = Join-Path $LogDirectory "dev_update_$timestamp.log"
 # Display startup banner
 Write-Host ""
 Write-Host "╔════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║  UPDATE-ULTRA v4.1 - Uniwersalny Updater      ║" -ForegroundColor Cyan
+Write-Host "║  UPDATE-ULTRA v4.2 - Uniwersalny Updater      ║" -ForegroundColor Cyan
 Write-Host "╚════════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Rozpoczynam aktualizację wszystkich środowisk..." -ForegroundColor White
@@ -545,7 +577,7 @@ Write-Host "Log: " -NoNewline -ForegroundColor Gray
 Write-Host $script:logFile -ForegroundColor Yellow
 Write-Host ""
 
-Write-Log "===== START UPDATE (ULTRA v4.1) ====="
+Write-Log "===== START UPDATE (ULTRA v4.2) ====="
 Write-Log "Log: $script:logFile"
 Write-Log "WhatIf: $WhatIf, Force: $Force, IncludeUnknown: $IncludeUnknown"
 
@@ -555,1027 +587,1075 @@ $Results = New-Object System.Collections.Generic.List[object]
 
 # 1) WINGET
 $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
-    param($r)
+            param($r)
 
-    if (-not (Test-CommandExists "winget")) {
-        $r.Status = "SKIP"
-        $r.Notes.Add("winget nie jest dostępny w PATH.")
-        return
-    }
-
-    Write-Log "winget --version:"
-    try { @((winget --version) 2>&1) | ForEach-Object { Write-Log $_ } } catch {}
-
-    Write-Log "winget source list:"
-    try { @((winget source list) 2>&1) | ForEach-Object { Write-Log $_ } } catch {}
-
-    Write-Log "winget pin list:"
-    try { @((winget pin list) 2>&1) | ForEach-Object { Write-Log $_ } } catch {}
-
-    Write-Host "  Sprawdzam zainstalowane pakiety..." -ForegroundColor Gray
-    Write-Log "LIST: winget list --source winget"
-    $listRaw = @()
-    [void](Try-Run -Body { winget list --source winget } -OutputLines ([ref]$listRaw))
-
-    # Count packages from winget source (skip header/footer lines)
-    $installedCount = 0
-    $inTable = $false
-    foreach ($line in $listRaw) {
-        if ($line -match '^\s*Name\s+Id\s+Version') { $inTable = $true; continue }
-        if ($line -match '^\s*-+\s*$') { continue }
-        if ($inTable -and $line -match '\S+') {
-            $parts = @($line -split '\s{2,}' | Where-Object { $_ -ne "" })
-            if ($parts.Count -ge 3) { $installedCount++ }
-        }
-    }
-    $r.Counts.Installed = $installedCount
-
-    Write-Host "  Sprawdzam dostępne aktualizacje..." -ForegroundColor Gray
-    Write-Log "LIST PRZED: winget upgrade"
-    $beforeRaw = @()
-    [void](Try-Run -Body { winget upgrade } -OutputLines ([ref]$beforeRaw))
-
-    $beforeItems = @(Parse-WingetUpgradeList -Lines $beforeRaw)
-    $explicitIdsBefore = @(Get-WingetExplicitTargetIds -Lines $beforeRaw)
-
-    # Statystyki
-    $r.Counts.Available = $beforeItems.Count + $explicitIdsBefore.Count
-
-    Write-Host "  Zainstalowane pakiety: $($r.Counts.Installed)" -ForegroundColor Gray
-    Write-Host "  Dostępne aktualizacje: $($r.Counts.Available)" -ForegroundColor Cyan
-    if ($explicitIdsBefore.Count -gt 0) {
-        Write-Host "  Explicit targeting: $($explicitIdsBefore.Count) pakietów" -ForegroundColor Yellow
-    }
-
-    $r.Actions.Add("Do aktualizacji (przed): $($beforeItems.Count)")
-    if ($explicitIdsBefore.Count -gt 0) {
-        $r.Actions.Add("Require explicit targeting (przed): $($explicitIdsBefore.Count) -> " + ($explicitIdsBefore -join ", "))
-    }
-
-    if ($WhatIf) {
-        $r.Actions.Add("[WHATIF] winget source update")
-    } else {
-        Write-Host "  Aktualizuję źródła winget..." -ForegroundColor Gray
-        Write-Log "winget source update..."
-        @((winget source update) 2>&1) | ForEach-Object { Write-Log $_ }
-    }
-
-    if ($WhatIf) {
-        $r.Actions.Add("[WHATIF] winget upgrade --id Microsoft.AppInstaller -e")
-    } else {
-        Write-Host "  Aktualizuję App Installer..." -ForegroundColor Gray
-        Write-Log "Aktualizacja App Installer..."
-        $aiLog = Join-Path $LogDirectory ("winget_AppInstaller_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
-
-        $aiArgs = @(
-            "upgrade","--id","Microsoft.AppInstaller","-e",
-            "--accept-source-agreements","--accept-package-agreements",
-            "--disable-interactivity","--verbose-logs","-o",$aiLog
-        )
-        if ($Force) { $aiArgs += "--force" }
-
-        $aiOut = @(& winget @aiArgs 2>&1)
-        $aiEc  = $LASTEXITCODE
-        $aiOut | ForEach-Object { Write-Log $_ }
-        Write-Log "ExitCode AppInstaller: $aiEc"
-
-        $r.Artifacts["winget_appinstaller_log"] = Resolve-ExistingLogOrNote -Path $aiLog
-
-        if ($aiOut -match 'No available upgrade found') {
-            $r.Notes.Add("AppInstaller: brak nowszej wersji (OK).")
-        } elseif ($aiEc -ne 0) {
-            $r.Notes.Add("AppInstaller: exitCode=$aiEc (log: $aiLog)")
-        }
-    }
-
-    $wingetAllLog = Join-Path $LogDirectory ("winget_all_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
-
-    $upgradeArgs = @(
-        "upgrade","--all",
-        "--accept-source-agreements","--accept-package-agreements",
-        "--disable-interactivity"
-    )
-    if ($IncludeUnknown) { $upgradeArgs += "--include-unknown" }
-    if ($Force)          { $upgradeArgs += "--force" }
-
-    $lines = @()
-    if ($WhatIf) {
-        $r.Actions.Add("[WHATIF] winget " + ($upgradeArgs -join " "))
-        return
-    }
-
-    Write-Host "  Uruchamiam winget upgrade --all..." -ForegroundColor Gray
-    Write-Host "  (To może potrwać kilka minut...)" -ForegroundColor DarkGray
-    Write-Log "winget $($upgradeArgs -join ' ')"
-    $ecAll = Try-Run -Body { winget @upgradeArgs 2>&1 | Tee-Object -FilePath $wingetAllLog } -OutputLines ([ref]$lines)
-    $r.ExitCode = $ecAll
-    @($lines) | ForEach-Object { Write-Log $_ }
-
-    $r.Artifacts["winget_all_log"] = Resolve-ExistingLogOrNote -Path $wingetAllLog
-
-    if ($ecAll -ne 0) {
-        try {
-            Write-Log "winget error $ecAll (dekodowanie):"
-            @((winget error --input "$ecAll") 2>&1) | ForEach-Object { Write-Log $_ } | Out-Null
-        } catch {}
-    }
-
-    $explicitIds = @(Get-WingetExplicitTargetIds -Lines $lines)
-    if ($explicitIds.Count -gt 0) {
-        Write-Host "  Znaleziono $($explicitIds.Count) pakietów wymagających explicit targeting" -ForegroundColor Yellow
-        $r.Notes.Add("Require explicit targeting: " + ($explicitIds -join ", "))
-    }
-
-    $blockers = @(Get-WingetRunningBlockers -Lines $lines)
-    if ($blockers.Count -gt 0) {
-        foreach ($b in $blockers) {
-            $r.Failures.Add("Aplikacja uruchomiona: $($b.Name) [$($b.Id)] — zamknij i uruchom ponownie.")
-        }
-    }
-
-    foreach ($id in $explicitIds) {
-        $cleanId = Sanitize-FileName $id
-        $singleLog = Join-Path $LogDirectory ("winget_explicit_{0}_{1}.log" -f $cleanId, (Get-Date -Format "yyyyMMdd_HHmmss"))
-
-        $args = @(
-            "upgrade","--id",$id,"-e",
-            "--accept-source-agreements","--accept-package-agreements",
-            "--disable-interactivity","--verbose-logs","-o",$singleLog
-        )
-        if ($Force) { $args += "--force" }
-
-        if ($WhatIf) {
-            $r.Actions.Add("[WHATIF] EXPLICIT: winget $($args -join ' ')")
-            continue
-        }
-
-        Write-Host "  Aktualizuję explicit: $id..." -ForegroundColor Gray
-        Write-Log "EXPLICIT: winget $($args -join ' ')"
-        $outX = @(& winget @args 2>&1)
-        $ecX  = $LASTEXITCODE
-        $outX | ForEach-Object { Write-Log $_ }
-
-        $r.Artifacts["winget_explicit_$($cleanId)"] = Resolve-ExistingLogOrNote -Path $singleLog
-
-        $isIgnored = $WingetIgnoreIds -contains $id
-
-        $r.Counts.Total++
-        if ($ecX -eq 0) {
-            $r.Counts.Ok++
-            $r.Counts.Updated++
-            Write-Host "    ✓ $id" -ForegroundColor Green
-            $r.Actions.Add("EXPLICIT OK: $id")
-        }
-        else {
-            if ($isIgnored) {
-                # Don't count ignored packages as failures
-                $r.Counts.Skipped++
-                Write-Host "    ⊘ $id (ignorowany)" -ForegroundColor Yellow
-                $r.Notes.Add("EXPLICIT IGNORED: $id (exitCode=$ecX, package is in ignore list)")
-                Write-Log "EXPLICIT IGNORED: $id (exitCode=$ecX, in ignore list)" "WARN"
-            } else {
-                $r.Counts.Fail++
-                $r.Counts.Failed++
-                Write-Host "    ✗ $id (błąd: $ecX)" -ForegroundColor Red
-                $r.Failures.Add("EXPLICIT FAIL: $id (exitCode=$ecX) log=$(Resolve-ExistingLogOrNote -Path $singleLog)")
-                # Policy: First non-zero exit code determines the section result.
-                if ($r.ExitCode -eq 0) { $r.ExitCode = $ecX }
+            if (-not (Test-CommandExists "winget")) {
+                $r.Status = "SKIP"
+                $r.Notes.Add("winget nie jest dostępny w PATH.")
+                return
             }
-        }
-    }
 
-    foreach ($id in $WingetRetryIds) {
-        $shouldRetry = $false
-        if ($beforeItems | Where-Object { $_.Id -eq $id }) { $shouldRetry = $true }
-        if ($blockers   | Where-Object { $_.Id -eq $id }) { $shouldRetry = $true }
-        if (-not $shouldRetry) { continue }
+            Write-Log "winget --version:"
+            try { @((winget --version) 2>&1) | ForEach-Object { Write-Log $_ } } catch {}
 
-        $cleanId = Sanitize-FileName $id
-        $retryLog = Join-Path $LogDirectory ("winget_retry_{0}_{1}.log" -f $cleanId, (Get-Date -Format "yyyyMMdd_HHmmss"))
+            Write-Log "winget source list:"
+            try { @((winget source list) 2>&1) | ForEach-Object { Write-Log $_ } } catch {}
 
-        $retryArgs = @(
-            "upgrade","--id",$id,"-e",
-            "--accept-source-agreements","--accept-package-agreements",
-            "--disable-interactivity","--verbose-logs","-o",$retryLog
-        )
-        if ($Force) { $retryArgs += "--force" }
+            Write-Log "winget pin list:"
+            try { @((winget pin list) 2>&1) | ForEach-Object { Write-Log $_ } } catch {}
 
-        if ($WhatIf) {
-            $r.Actions.Add("[WHATIF] RETRY: winget $($retryArgs -join ' ')")
-            continue
-        }
+            Write-Host "  Sprawdzam zainstalowane pakiety..." -ForegroundColor Gray
+            Write-Log "LIST: winget list --source winget"
+            $listRaw = @()
+            [void](Try-Run -Body { winget list --source winget } -OutputLines ([ref]$listRaw))
 
-        Write-Log "RETRY: winget $($retryArgs -join ' ')"
-        $outR = @(& winget @retryArgs 2>&1)
-        $ecR  = $LASTEXITCODE
-        $outR | ForEach-Object { Write-Log $_ }
-
-        $r.Artifacts["winget_retry_$($cleanId)"] = Resolve-ExistingLogOrNote -Path $retryLog
-
-        $isIgnored = $WingetIgnoreIds -contains $id
-
-        $r.Counts.Total++
-        if ($ecR -eq 0) {
-            $r.Counts.Ok++
-            $r.Counts.Updated++
-            $r.Actions.Add("RETRY OK: $id")
-        }
-        else {
-            if ($isIgnored) {
-                # Don't count ignored packages as failures
-                $r.Counts.Skipped++
-                $r.Notes.Add("RETRY IGNORED: $id (exitCode=$ecR, package is in ignore list)")
-                Write-Log "RETRY IGNORED: $id (exitCode=$ecR, in ignore list)" "WARN"
-            } else {
-                $r.Counts.Fail++
-                $r.Counts.Failed++
-                $r.Failures.Add("RETRY FAIL: $id (exitCode=$ecR) log=$(Resolve-ExistingLogOrNote -Path $retryLog)")
-                if ($r.ExitCode -eq 0) { $r.ExitCode = $ecR }
+            # Count packages from winget source (skip header/footer lines)
+            $installedCount = 0
+            $inTable = $false
+            foreach ($line in $listRaw) {
+                if ($line -match '^\s*Name\s+Id\s+Version') { $inTable = $true; continue }
+                if ($line -match '^\s*-+\s*$') { continue }
+                if ($inTable -and $line -match '\S+') {
+                    $parts = @($line -split '\s{2,}' | Where-Object { $_ -ne "" })
+                    if ($parts.Count -ge 3) { $installedCount++ }
+                }
             }
-        }
-    }
+            $r.Counts.Installed = $installedCount
 
-    Write-Log "LIST PO: winget upgrade"
-    $afterRaw = @()
-    [void](Try-Run -Body { winget upgrade } -OutputLines ([ref]$afterRaw))
-    $afterItems = @(Parse-WingetUpgradeList -Lines $afterRaw)
-    $explicitIdsAfter = @(Get-WingetExplicitTargetIds -Lines $afterRaw)
+            Write-Host "  Sprawdzam dostępne aktualizacje..." -ForegroundColor Gray
+            Write-Log "LIST PRZED: winget upgrade"
+            $beforeRaw = @()
+            [void](Try-Run -Body { winget upgrade } -OutputLines ([ref]$beforeRaw))
 
-    $r.Actions.Add("Pozostało do aktualizacji (po): $($afterItems.Count)")
-    if ($explicitIdsAfter.Count -gt 0) {
-        $r.Actions.Add("Require explicit targeting (po): $($explicitIdsAfter.Count) -> " + ($explicitIdsAfter -join ", "))
-    }
+            $beforeItems = @(Parse-WingetUpgradeList -Lines $beforeRaw)
+            $explicitIdsBefore = @(Get-WingetExplicitTargetIds -Lines $beforeRaw)
 
-    # Build package list - compare before and after
-    $allItemIds = @($beforeItems + $afterItems | ForEach-Object { $_.Id })
-    $allExplicitIds = @($explicitIdsBefore + $explicitIdsAfter)
-    $allIds = @($allItemIds + $allExplicitIds | Select-Object -Unique)
+            # Statystyki
+            $r.Counts.Available = $beforeItems.Count + $explicitIdsBefore.Count
 
-    foreach ($id in $allIds) {
-        $before = $beforeItems | Where-Object { $_.Id -eq $id } | Select-Object -First 1
-        $after = $afterItems | Where-Object { $_.Id -eq $id } | Select-Object -First 1
-        $isIgnored = $WingetIgnoreIds -contains $id
+            Write-Host "  Zainstalowane pakiety: $($r.Counts.Installed)" -ForegroundColor Gray
+            Write-Host "  Dostępne aktualizacje: $($r.Counts.Available)" -ForegroundColor Cyan
+            if ($explicitIdsBefore.Count -gt 0) {
+                Write-Host "  Explicit targeting: $($explicitIdsBefore.Count) pakietów" -ForegroundColor Yellow
+            }
 
-        $status = "NoChange"
-        if ($before -and -not $after) { $status = "Updated" }
-        elseif ($before -and $after -and $before.Version -ne $after.Version) { $status = "Updated" }
-        elseif ($isIgnored) { $status = "Skipped" }
+            $r.Actions.Add("Do aktualizacji (przed): $($beforeItems.Count)")
+            if ($explicitIdsBefore.Count -gt 0) {
+                $r.Actions.Add("Require explicit targeting (przed): $($explicitIdsBefore.Count) -> " + ($explicitIdsBefore -join ", "))
+            }
 
-        $pkgName = $id
-        if ($before -and $before.Name) { $pkgName = $before.Name }
-        elseif ($after -and $after.Name) { $pkgName = $after.Name }
+            if ($WhatIf) {
+                $r.Actions.Add("[WHATIF] winget source update")
+            }
+            else {
+                Write-Host "  Aktualizuję źródła winget..." -ForegroundColor Gray
+                Write-Log "winget source update..."
+                @((winget source update) 2>&1) | ForEach-Object { Write-Log $_ }
+            }
 
-        $r.Packages.Add([pscustomobject]@{
-            Name          = $pkgName
-            VersionBefore = if ($before) { $before.Version } else { $null }
-            VersionAfter  = if ($status -eq "Updated") { if ($before) { $before.Available } else { $null } } else { if ($after) { $after.Version } else { $null } }
-            Status        = $status
-        })
-    }
+            if ($WhatIf) {
+                $r.Actions.Add("[WHATIF] winget upgrade --id Microsoft.AppInstaller -e")
+            }
+            else {
+                Write-Host "  Aktualizuję App Installer..." -ForegroundColor Gray
+                Write-Log "Aktualizacja App Installer..."
+                $aiLog = Join-Path $LogDirectory ("winget_AppInstaller_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
 
-    Write-Log "[DEBUG] Winget section complete. Total packages in list: $($r.Packages.Count)"
+                $aiArgs = @(
+                    "upgrade", "--id", "Microsoft.AppInstaller", "-e",
+                    "--accept-source-agreements", "--accept-package-agreements",
+                    "--disable-interactivity", "--verbose-logs", "-o", $aiLog
+                )
+                if ($Force) { $aiArgs += "--force" }
 
-    $hasFailures = ($r.Failures.Count -gt 0) -or ($r.Counts.Fail -gt 0)
-    if ($hasFailures -or $ecAll -ne 0) {
-        $r.Status = "FAIL"
-        if ($ecAll -ne 0) { $r.Failures.Add("winget upgrade --all exitCode=$ecAll (log: $wingetAllLog)") }
-    } else {
-        $r.Status = "OK"
-    }
-}))
+                $aiOut = @(& winget @aiArgs 2>&1)
+                $aiEc = $LASTEXITCODE
+                $aiOut | ForEach-Object { Write-Log $_ }
+                Write-Log "ExitCode AppInstaller: $aiEc"
+
+                $r.Artifacts["winget_appinstaller_log"] = Resolve-ExistingLogOrNote -Path $aiLog
+
+                if ($aiOut -match 'No available upgrade found') {
+                    $r.Notes.Add("AppInstaller: brak nowszej wersji (OK).")
+                }
+                elseif ($aiEc -ne 0) {
+                    $r.Notes.Add("AppInstaller: exitCode=$aiEc (log: $aiLog)")
+                }
+            }
+
+            $wingetAllLog = Join-Path $LogDirectory ("winget_all_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+
+            $upgradeArgs = @(
+                "upgrade", "--all",
+                "--accept-source-agreements", "--accept-package-agreements",
+                "--disable-interactivity"
+            )
+            if ($IncludeUnknown) { $upgradeArgs += "--include-unknown" }
+            if ($Force) { $upgradeArgs += "--force" }
+
+            $lines = @()
+            if ($WhatIf) {
+                $r.Actions.Add("[WHATIF] winget " + ($upgradeArgs -join " "))
+                return
+            }
+
+            Write-Host "  Uruchamiam winget upgrade --all..." -ForegroundColor Gray
+            Write-Host "  (To może potrwać kilka minut...)" -ForegroundColor DarkGray
+            Write-Log "winget $($upgradeArgs -join ' ')"
+            $ecAll = Try-Run -Body { winget @upgradeArgs 2>&1 | Tee-Object -FilePath $wingetAllLog } -OutputLines ([ref]$lines)
+            $r.ExitCode = $ecAll
+            @($lines) | ForEach-Object { Write-Log $_ }
+
+            $r.Artifacts["winget_all_log"] = Resolve-ExistingLogOrNote -Path $wingetAllLog
+
+            if ($ecAll -ne 0) {
+                try {
+                    Write-Log "winget error $ecAll (dekodowanie):"
+                    @((winget error --input "$ecAll") 2>&1) | ForEach-Object { Write-Log $_ } | Out-Null
+                }
+                catch {}
+            }
+
+            $explicitIds = @(Get-WingetExplicitTargetIds -Lines $lines)
+            if ($explicitIds.Count -gt 0) {
+                Write-Host "  Znaleziono $($explicitIds.Count) pakietów wymagających explicit targeting" -ForegroundColor Yellow
+                $r.Notes.Add("Require explicit targeting: " + ($explicitIds -join ", "))
+            }
+
+            $blockers = @(Get-WingetRunningBlockers -Lines $lines)
+            if ($blockers.Count -gt 0) {
+                foreach ($b in $blockers) {
+                    $r.Failures.Add("Aplikacja uruchomiona: $($b.Name) [$($b.Id)] — zamknij i uruchom ponownie.")
+                }
+            }
+
+            foreach ($id in $explicitIds) {
+                $cleanId = Sanitize-FileName $id
+                $singleLog = Join-Path $LogDirectory ("winget_explicit_{0}_{1}.log" -f $cleanId, (Get-Date -Format "yyyyMMdd_HHmmss"))
+
+                $args = @(
+                    "upgrade", "--id", $id, "-e",
+                    "--accept-source-agreements", "--accept-package-agreements",
+                    "--disable-interactivity", "--verbose-logs", "-o", $singleLog
+                )
+                if ($Force) { $args += "--force" }
+
+                if ($WhatIf) {
+                    $r.Actions.Add("[WHATIF] EXPLICIT: winget $($args -join ' ')")
+                    continue
+                }
+
+                Write-Host "  Aktualizuję explicit: $id..." -ForegroundColor Gray
+                Write-Log "EXPLICIT: winget $($args -join ' ')"
+                $outX = @(& winget @args 2>&1)
+                $ecX = $LASTEXITCODE
+                $outX | ForEach-Object { Write-Log $_ }
+
+                $r.Artifacts["winget_explicit_$($cleanId)"] = Resolve-ExistingLogOrNote -Path $singleLog
+
+                $isIgnored = $WingetIgnoreIds -contains $id
+
+                $r.Counts.Total++
+                if ($ecX -eq 0) {
+                    $r.Counts.Ok++
+                    $r.Counts.Updated++
+                    Write-Host "    ✓ $id" -ForegroundColor Green
+                    $r.Actions.Add("EXPLICIT OK: $id")
+                }
+                else {
+                    if ($isIgnored) {
+                        # Don't count ignored packages as failures
+                        $r.Counts.Skipped++
+                        Write-Host "    ⊘ $id (ignorowany)" -ForegroundColor Yellow
+                        $r.Notes.Add("EXPLICIT IGNORED: $id (exitCode=$ecX, package is in ignore list)")
+                        Write-Log "EXPLICIT IGNORED: $id (exitCode=$ecX, in ignore list)" "WARN"
+                    }
+                    else {
+                        $r.Counts.Fail++
+                        $r.Counts.Failed++
+                        Write-Host "    ✗ $id (błąd: $ecX)" -ForegroundColor Red
+                        $r.Failures.Add("EXPLICIT FAIL: $id (exitCode=$ecX) log=$(Resolve-ExistingLogOrNote -Path $singleLog)")
+                        # Policy: First non-zero exit code determines the section result.
+                        if ($r.ExitCode -eq 0) { $r.ExitCode = $ecX }
+                    }
+                }
+            }
+
+            foreach ($id in $WingetRetryIds) {
+                $shouldRetry = $false
+                if ($beforeItems | Where-Object { $_.Id -eq $id }) { $shouldRetry = $true }
+                if ($blockers   | Where-Object { $_.Id -eq $id }) { $shouldRetry = $true }
+                if (-not $shouldRetry) { continue }
+
+                $cleanId = Sanitize-FileName $id
+                $retryLog = Join-Path $LogDirectory ("winget_retry_{0}_{1}.log" -f $cleanId, (Get-Date -Format "yyyyMMdd_HHmmss"))
+
+                $retryArgs = @(
+                    "upgrade", "--id", $id, "-e",
+                    "--accept-source-agreements", "--accept-package-agreements",
+                    "--disable-interactivity", "--verbose-logs", "-o", $retryLog
+                )
+                if ($Force) { $retryArgs += "--force" }
+
+                if ($WhatIf) {
+                    $r.Actions.Add("[WHATIF] RETRY: winget $($retryArgs -join ' ')")
+                    continue
+                }
+
+                Write-Log "RETRY: winget $($retryArgs -join ' ')"
+                $outR = @(& winget @retryArgs 2>&1)
+                $ecR = $LASTEXITCODE
+                $outR | ForEach-Object { Write-Log $_ }
+
+                $r.Artifacts["winget_retry_$($cleanId)"] = Resolve-ExistingLogOrNote -Path $retryLog
+
+                $isIgnored = $WingetIgnoreIds -contains $id
+
+                $r.Counts.Total++
+                if ($ecR -eq 0) {
+                    $r.Counts.Ok++
+                    $r.Counts.Updated++
+                    $r.Actions.Add("RETRY OK: $id")
+                }
+                else {
+                    if ($isIgnored) {
+                        # Don't count ignored packages as failures
+                        $r.Counts.Skipped++
+                        $r.Notes.Add("RETRY IGNORED: $id (exitCode=$ecR, package is in ignore list)")
+                        Write-Log "RETRY IGNORED: $id (exitCode=$ecR, in ignore list)" "WARN"
+                    }
+                    else {
+                        $r.Counts.Fail++
+                        $r.Counts.Failed++
+                        $r.Failures.Add("RETRY FAIL: $id (exitCode=$ecR) log=$(Resolve-ExistingLogOrNote -Path $retryLog)")
+                        if ($r.ExitCode -eq 0) { $r.ExitCode = $ecR }
+                    }
+                }
+            }
+
+            Write-Log "LIST PO: winget upgrade"
+            $afterRaw = @()
+            [void](Try-Run -Body { winget upgrade } -OutputLines ([ref]$afterRaw))
+            $afterItems = @(Parse-WingetUpgradeList -Lines $afterRaw)
+            $explicitIdsAfter = @(Get-WingetExplicitTargetIds -Lines $afterRaw)
+
+            $r.Actions.Add("Pozostało do aktualizacji (po): $($afterItems.Count)")
+            if ($explicitIdsAfter.Count -gt 0) {
+                $r.Actions.Add("Require explicit targeting (po): $($explicitIdsAfter.Count) -> " + ($explicitIdsAfter -join ", "))
+            }
+
+            # Build package list - compare before and after
+            $allItemIds = @($beforeItems + $afterItems | ForEach-Object { $_.Id })
+            $allExplicitIds = @($explicitIdsBefore + $explicitIdsAfter)
+            $allIds = @($allItemIds + $allExplicitIds | Select-Object -Unique)
+
+            foreach ($id in $allIds) {
+                $before = $beforeItems | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+                $after = $afterItems | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+                $isIgnored = $WingetIgnoreIds -contains $id
+
+                $status = "NoChange"
+                if ($before -and -not $after) { $status = "Updated" }
+                elseif ($before -and $after -and $before.Version -ne $after.Version) { $status = "Updated" }
+                elseif ($isIgnored) { $status = "Skipped" }
+
+                $pkgName = $id
+                if ($before -and $before.Name) { $pkgName = $before.Name }
+                elseif ($after -and $after.Name) { $pkgName = $after.Name }
+
+                $r.Packages.Add([pscustomobject]@{
+                        Name          = $pkgName
+                        VersionBefore = if ($before) { $before.Version } else { $null }
+                        VersionAfter  = if ($status -eq "Updated") { if ($before) { $before.Available } else { $null } } else { if ($after) { $after.Version } else { $null } }
+                        Status        = $status
+                    })
+            }
+
+            Write-Log "[DEBUG] Winget section complete. Total packages in list: $($r.Packages.Count)"
+
+            $hasFailures = ($r.Failures.Count -gt 0) -or ($r.Counts.Fail -gt 0)
+            if ($hasFailures -or $ecAll -ne 0) {
+                $r.Status = "FAIL"
+                if ($ecAll -ne 0) { $r.Failures.Add("winget upgrade --all exitCode=$ecAll (log: $wingetAllLog)") }
+            }
+            else {
+                $r.Status = "OK"
+            }
+        }))
 
 # 2) PYTHON/PIP
 $Results.Add((Invoke-Step -Name "Python/Pip" -Skip:$SkipPip -Body {
-    param($r)
+            param($r)
 
-    $targets = @(Get-PythonTargets -InterpretersConfig $PythonInterpreters `
-                                 -VenvRootPaths $PythonVenvRootPaths `
-                                 -VenvExplicit  $PythonVenvExplicit)
+            $targets = @(Get-PythonTargets -InterpretersConfig $PythonInterpreters `
+                    -VenvRootPaths $PythonVenvRootPaths `
+                    -VenvExplicit  $PythonVenvExplicit)
 
-    if ($targets.Count -eq 0) {
-        $r.Status = "SKIP"
-        $r.Notes.Add("Nie znaleziono działających interpreterów/venvów.")
-        return
-    }
-
-    $r.Actions.Add("Targets: $($targets.Count)")
-
-    foreach ($t in $targets) {
-        Write-Log ">>> Python target: $t"
-        if ($WhatIf) { $r.Actions.Add("[WHATIF] pip upgrade dla: $t"); continue }
-
-        try {
-            Write-Log "pip upgrade: $t -m pip install --upgrade pip"
-            @(& $t -m pip install --upgrade pip 2>&1) | ForEach-Object { Write-Log $_ }
-        } catch {
-            $r.Counts.Total++; $r.Counts.Fail++
-            $r.Failures.Add("pip self-upgrade FAIL: $t :: $($_.Exception.Message)")
-            continue
-        }
-
-        # Get all installed packages
-        $allPkgs = @()
-        [void](Try-Run -Body { & $t -m pip list --format=json } -OutputLines ([ref]$allPkgs))
-        $allJoined = (($allPkgs -join "`n").Trim())
-        $allPkgsList = @()
-        if ($allJoined -and $allJoined.StartsWith("[")) {
-            try { $allPkgsList = @($allJoined | ConvertFrom-Json) } catch { $allPkgsList = @() }
-        }
-        $r.Counts.Installed += $allPkgsList.Count
-
-        $outdated = @()
-        [void](Try-Run -Body { & $t -m pip list --outdated --format=json } -OutputLines ([ref]$outdated))
-        $joined = (($outdated -join "`n").Trim())
-
-        if (-not $joined -or -not $joined.StartsWith("[")) {
-            $r.Notes.Add("Brak outdated lub nieczytelny format: $t")
-            continue
-        }
-
-        $pkgs = @()
-        try { $pkgs = @($joined | ConvertFrom-Json) } catch { $pkgs = @() }
-
-        if ($pkgs.Count -eq 0) {
-            $r.Notes.Add("Brak paczek do aktualizacji: $t")
-            continue
-        }
-
-        $r.Actions.Add("pip: $($allPkgsList.Count) installed, $($pkgs.Count) outdated ($t)")
-        $r.Counts.Available += $pkgs.Count
-
-        foreach ($p in $pkgs) {
-            $r.Counts.Total++
-            try {
-                Write-Log "pip upgrade pkg: $($p.name) ($t)"
-                @(& $t -m pip install --upgrade $p.name 2>&1) | ForEach-Object { Write-Log $_ }
-                $r.Counts.Ok++
-                $r.Counts.Updated++
-
-                # Add to package list
-                $r.Packages.Add([pscustomobject]@{
-                    Name          = $p.name
-                    VersionBefore = $p.version
-                    VersionAfter  = $p.latest_version
-                    Status        = "Updated"
-                })
-                Write-Log "[DEBUG] Added package to list: $($p.name) $($p.version) → $($p.latest_version)"
-            } catch {
-                $r.Counts.Fail++
-                $r.Counts.Failed++
-                $r.Failures.Add("pip upgrade FAIL: $($p.name) ($t) :: $($_.Exception.Message)")
-
-                # Add to package list as failed
-                $r.Packages.Add([pscustomobject]@{
-                    Name          = $p.name
-                    VersionBefore = $p.version
-                    VersionAfter  = $null
-                    Status        = "Failed"
-                })
+            if ($targets.Count -eq 0) {
+                $r.Status = "SKIP"
+                $r.Notes.Add("Nie znaleziono działających interpreterów/venvów.")
+                return
             }
-        }
-    }
 
-    Write-Log "[DEBUG] Python/Pip section complete. Total packages in list: $($r.Packages.Count)"
-    if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
-}))
+            $r.Actions.Add("Targets: $($targets.Count)")
+
+            foreach ($t in $targets) {
+                Write-Log ">>> Python target: $t"
+                if ($WhatIf) { $r.Actions.Add("[WHATIF] pip upgrade dla: $t"); continue }
+
+                try {
+                    Write-Log "pip upgrade: $t -m pip install --upgrade pip"
+                    @(& $t -m pip install --upgrade pip 2>&1) | ForEach-Object { Write-Log $_ }
+                }
+                catch {
+                    $r.Counts.Total++; $r.Counts.Fail++
+                    $r.Failures.Add("pip self-upgrade FAIL: $t :: $($_.Exception.Message)")
+                    continue
+                }
+
+                # Get all installed packages
+                $allPkgs = @()
+                [void](Try-Run -Body { & $t -m pip list --format=json } -OutputLines ([ref]$allPkgs))
+                $allJoined = (($allPkgs -join "`n").Trim())
+                $allPkgsList = @()
+                if ($allJoined -and $allJoined.StartsWith("[")) {
+                    try { $allPkgsList = @($allJoined | ConvertFrom-Json) } catch { $allPkgsList = @() }
+                }
+                $r.Counts.Installed += $allPkgsList.Count
+
+                $outdated = @()
+                [void](Try-Run -Body { & $t -m pip list --outdated --format=json } -OutputLines ([ref]$outdated))
+                $joined = (($outdated -join "`n").Trim())
+
+                if (-not $joined -or -not $joined.StartsWith("[")) {
+                    $r.Notes.Add("Brak outdated lub nieczytelny format: $t")
+                    continue
+                }
+
+                $pkgs = @()
+                try { $pkgs = @($joined | ConvertFrom-Json) } catch { $pkgs = @() }
+
+                if ($pkgs.Count -eq 0) {
+                    $r.Notes.Add("Brak paczek do aktualizacji: $t")
+                    continue
+                }
+
+                $r.Actions.Add("pip: $($allPkgsList.Count) installed, $($pkgs.Count) outdated ($t)")
+                $r.Counts.Available += $pkgs.Count
+
+                foreach ($p in $pkgs) {
+                    $r.Counts.Total++
+                    try {
+                        Write-Log "pip upgrade pkg: $($p.name) ($t)"
+                        @(& $t -m pip install --upgrade $p.name 2>&1) | ForEach-Object { Write-Log $_ }
+                        $r.Counts.Ok++
+                        $r.Counts.Updated++
+
+                        # Add to package list
+                        $r.Packages.Add([pscustomobject]@{
+                                Name          = $p.name
+                                VersionBefore = $p.version
+                                VersionAfter  = $p.latest_version
+                                Status        = "Updated"
+                            })
+                        Write-Log "[DEBUG] Added package to list: $($p.name) $($p.version) → $($p.latest_version)"
+                    }
+                    catch {
+                        $r.Counts.Fail++
+                        $r.Counts.Failed++
+                        $r.Failures.Add("pip upgrade FAIL: $($p.name) ($t) :: $($_.Exception.Message)")
+
+                        # Add to package list as failed
+                        $r.Packages.Add([pscustomobject]@{
+                                Name          = $p.name
+                                VersionBefore = $p.version
+                                VersionAfter  = $null
+                                Status        = "Failed"
+                            })
+                    }
+                }
+            }
+
+            Write-Log "[DEBUG] Python/Pip section complete. Total packages in list: $($r.Packages.Count)"
+            if ($r.Counts.Fail -gt 0) { $r.Status = "FAIL"; $r.ExitCode = 1 }
+        }))
 
 # 3) NPM
 $Results.Add((Invoke-Step -Name "npm (global)" -Skip:$SkipNpm -Body {
-    param($r)
-    if (-not (Test-CommandExists "npm")) { $r.Status="SKIP"; $r.Notes.Add("npm brak w PATH."); return }
+            param($r)
+            if (-not (Test-CommandExists "npm")) { $r.Status = "SKIP"; $r.Notes.Add("npm brak w PATH."); return }
 
-    # Get installed global packages
-    try {
-        $npmList = @((npm list -g --depth=0 --json 2>$null) | ConvertFrom-Json)
-        if ($npmList.dependencies) {
-            $r.Counts.Installed = ($npmList.dependencies | Get-Member -MemberType NoteProperty).Count
-        }
-    } catch {
-        Write-Log "Nie można pobrać listy npm packages: $($_.Exception.Message)" "WARN"
-    }
+            # Get installed global packages
+            try {
+                $npmList = @((npm list -g --depth=0 --json 2>$null) | ConvertFrom-Json)
+                if ($npmList.dependencies) {
+                    $r.Counts.Installed = ($npmList.dependencies | Get-Member -MemberType NoteProperty).Count
+                }
+            }
+            catch {
+                Write-Log "Nie można pobrać listy npm packages: $($_.Exception.Message)" "WARN"
+            }
 
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] npm -g update"); return }
-    Write-Log "npm -g update..."
-    @((npm -g update) 2>&1) | ForEach-Object { Write-Log $_ }
-}))
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] npm -g update"); return }
+            Write-Log "npm -g update..."
+            @((npm -g update) 2>&1) | ForEach-Object { Write-Log $_ }
+        }))
 
 # 4) CHOCO
 $Results.Add((Invoke-Step -Name "Chocolatey" -Skip:$SkipChoco -Body {
-    param($r)
-    if (-not (Test-CommandExists "choco")) { $r.Status="SKIP"; $r.Notes.Add("choco brak w PATH."); return }
+            param($r)
+            if (-not (Test-CommandExists "choco")) { $r.Status = "SKIP"; $r.Notes.Add("choco brak w PATH."); return }
 
-    # Get installed packages
-    try {
-        $chocoList = @((choco list --local-only) 2>&1)
-        $pkgCount = ($chocoList | Where-Object { $_ -match '^\S+\s+\d' }).Count
-        $r.Counts.Installed = $pkgCount
-    } catch {
-        Write-Log "Nie można pobrać listy choco packages: $($_.Exception.Message)" "WARN"
-    }
+            # Get installed packages
+            try {
+                $chocoList = @((choco list --local-only) 2>&1)
+                $pkgCount = ($chocoList | Where-Object { $_ -match '^\S+\s+\d' }).Count
+                $r.Counts.Installed = $pkgCount
+            }
+            catch {
+                Write-Log "Nie można pobrać listy choco packages: $($_.Exception.Message)" "WARN"
+            }
 
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] choco upgrade all -y"); return }
-    Write-Log "choco upgrade all -y..."
-    $out = @((choco upgrade all -y) 2>&1)
-    $ec  = $LASTEXITCODE
-    $out | ForEach-Object { Write-Log $_ }
-    $r.ExitCode = $ec
-    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("choco exitCode=$ec") }
-}))
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] choco upgrade all -y"); return }
+            Write-Log "choco upgrade all -y..."
+            $out = @((choco upgrade all -y) 2>&1)
+            $ec = $LASTEXITCODE
+            $out | ForEach-Object { Write-Log $_ }
+            $r.ExitCode = $ec
+            if ($ec -ne 0) { $r.Status = "FAIL"; $r.ExitCode = 1; $r.Failures.Add("choco exitCode=$ec") }
+        }))
 
 # 5) PS MODULES
 $Results.Add((Invoke-Step -Name "PowerShell Modules" -Skip:$SkipPSModules -Body {
-    param($r)
-    if (-not (Test-CommandExists "Get-InstalledModule") -or -not (Test-CommandExists "Update-Module")) {
-        $r.Status="SKIP"; $r.Notes.Add("Brak PowerShellGet (Get-InstalledModule/Update-Module)."); return
-    }
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] Update-Module (all)"); return }
+            param($r)
+            if (-not (Test-CommandExists "Get-InstalledModule") -or -not (Test-CommandExists "Update-Module")) {
+                $r.Status = "SKIP"; $r.Notes.Add("Brak PowerShellGet (Get-InstalledModule/Update-Module)."); return
+            }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] Update-Module (all)"); return }
 
-    $allMods = @(Get-InstalledModule -ErrorAction SilentlyContinue)
-    $r.Counts.Installed = $allMods.Count
+            $allMods = @(Get-InstalledModule -ErrorAction SilentlyContinue)
+            $r.Counts.Installed = $allMods.Count
 
-    $mods = @($allMods | Where-Object Name -ne 'Microsoft.WinGet.Client')
-    if ($mods.Count -eq 0) { $r.Notes.Add("Brak modułów do aktualizacji."); return }
+            $mods = @($allMods | Where-Object Name -ne 'Microsoft.WinGet.Client')
+            if ($mods.Count -eq 0) { $r.Notes.Add("Brak modułów do aktualizacji."); return }
 
-    $r.Actions.Add("Moduły: $($mods.Count)")
-    # Note: PowerShell Update-Module doesn't report which modules have updates available
-    # We just try to update all modules, so Available stays 0
+            $r.Actions.Add("Moduły: $($mods.Count)")
+            # Note: PowerShell Update-Module doesn't report which modules have updates available
+            # We just try to update all modules, so Available stays 0
 
-    foreach ($m in $mods) {
-        $r.Counts.Total++
-        $versionBefore = $m.Version
-        try {
-            Write-Log "Update-Module: $($m.Name)"
-            Update-Module -Name $m.Name -Force -ErrorAction Continue 2>&1 | ForEach-Object { Write-Log $_ }
-            $r.Counts.Ok++
-            $r.Counts.Updated++
+            foreach ($m in $mods) {
+                $r.Counts.Total++
+                $versionBefore = $m.Version
+                try {
+                    Write-Log "Update-Module: $($m.Name)"
+                    Update-Module -Name $m.Name -Force -ErrorAction Continue 2>&1 | ForEach-Object { Write-Log $_ }
+                    $r.Counts.Ok++
+                    $r.Counts.Updated++
 
-            # Get version after update
-            $updatedMod = Get-InstalledModule -Name $m.Name -ErrorAction SilentlyContinue | Select-Object -First 1
-            $versionAfter = if ($updatedMod -and $updatedMod.Version) { $updatedMod.Version } else { $versionBefore }
+                    # Get version after update
+                    $updatedMod = Get-InstalledModule -Name $m.Name -ErrorAction SilentlyContinue | Select-Object -First 1
+                    $versionAfter = if ($updatedMod -and $updatedMod.Version) { $updatedMod.Version } else { $versionBefore }
 
-            $r.Packages.Add([pscustomobject]@{
-                Name          = $m.Name
-                VersionBefore = $versionBefore
-                VersionAfter  = $versionAfter
-                Status        = if ($versionBefore -ne $versionAfter) { "Updated" } else { "NoChange" }
-            })
-            Write-Log "[DEBUG] Added PS module to list: $($m.Name) $versionBefore → $versionAfter"
-        } catch {
-            $r.Counts.Fail++
-            $r.Counts.Failed++
-            $r.Failures.Add("Update-Module FAIL: $($m.Name) :: $($_.Exception.Message)")
+                    $r.Packages.Add([pscustomobject]@{
+                            Name          = $m.Name
+                            VersionBefore = $versionBefore
+                            VersionAfter  = $versionAfter
+                            Status        = if ($versionBefore -ne $versionAfter) { "Updated" } else { "NoChange" }
+                        })
+                    Write-Log "[DEBUG] Added PS module to list: $($m.Name) $versionBefore → $versionAfter"
+                }
+                catch {
+                    $r.Counts.Fail++
+                    $r.Counts.Failed++
+                    $r.Failures.Add("Update-Module FAIL: $($m.Name) :: $($_.Exception.Message)")
 
-            $r.Packages.Add([pscustomobject]@{
-                Name          = $m.Name
-                VersionBefore = $versionBefore
-                VersionAfter  = $null
-                Status        = "Failed"
-            })
-        }
-    }
-    Write-Log "[DEBUG] PowerShell Modules section complete. Total packages in list: $($r.Packages.Count)"
-    if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
-}))
+                    $r.Packages.Add([pscustomobject]@{
+                            Name          = $m.Name
+                            VersionBefore = $versionBefore
+                            VersionAfter  = $null
+                            Status        = "Failed"
+                        })
+                }
+            }
+            Write-Log "[DEBUG] PowerShell Modules section complete. Total packages in list: $($r.Packages.Count)"
+            if ($r.Counts.Fail -gt 0) { $r.Status = "FAIL"; $r.ExitCode = 1 }
+        }))
 
 # 6) VS CODE
 $Results.Add((Invoke-Step -Name "VS Code Extensions" -Skip:$SkipVSCode -Body {
-    param($r)
-    if (-not (Test-CommandExists "code")) { $r.Status="SKIP"; $r.Notes.Add("code brak w PATH."); return }
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] update extensions"); return }
+            param($r)
+            if (-not (Test-CommandExists "code")) { $r.Status = "SKIP"; $r.Notes.Add("code brak w PATH."); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] update extensions"); return }
 
-    $ext = @((code --list-extensions) 2>&1) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    $r.Counts.Installed = $ext.Count
-    $r.Actions.Add("Extensions: $($ext.Count)")
-    # Note: code --install-extension --force doesn't report which extensions have updates
-    # We just reinstall all extensions, so Available stays 0
+            $ext = @((code --list-extensions) 2>&1) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            $r.Counts.Installed = $ext.Count
+            $r.Actions.Add("Extensions: $($ext.Count)")
+            # Note: code --install-extension --force doesn't report which extensions have updates
+            # We just reinstall all extensions, so Available stays 0
 
-    foreach ($e in $ext) {
-        $r.Counts.Total++
-        try {
-            Write-Log "VSCode ext --force: $e"
-            @((code --install-extension $e --force) 2>&1) | ForEach-Object { Write-Log $_ }
-            $r.Counts.Ok++
-            $r.Counts.Updated++
+            foreach ($e in $ext) {
+                $r.Counts.Total++
+                try {
+                    Write-Log "VSCode ext --force: $e"
+                    @((code --install-extension $e --force) 2>&1) | ForEach-Object { Write-Log $_ }
+                    $r.Counts.Ok++
+                    $r.Counts.Updated++
 
-            $r.Packages.Add([pscustomobject]@{
-                Name    = $e
-                Version = $null  # VS Code CLI doesn't provide version info easily
-                Status  = "Updated"
-            })
-            Write-Log "[DEBUG] Added VS Code extension to list: $e"
-        } catch {
-            $r.Counts.Fail++
-            $r.Counts.Failed++
-            $r.Failures.Add("VSCode ext FAIL: $e :: $($_.Exception.Message)")
+                    $r.Packages.Add([pscustomobject]@{
+                            Name    = $e
+                            Version = $null  # VS Code CLI doesn't provide version info easily
+                            Status  = "Updated"
+                        })
+                    Write-Log "[DEBUG] Added VS Code extension to list: $e"
+                }
+                catch {
+                    $r.Counts.Fail++
+                    $r.Counts.Failed++
+                    $r.Failures.Add("VSCode ext FAIL: $e :: $($_.Exception.Message)")
 
-            $r.Packages.Add([pscustomobject]@{
-                Name    = $e
-                Version = $null
-                Status  = "Failed"
-            })
-        }
-    }
-    Write-Log "[DEBUG] VS Code Extensions section complete. Total packages in list: $($r.Packages.Count)"
-    if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
-}))
+                    $r.Packages.Add([pscustomobject]@{
+                            Name    = $e
+                            Version = $null
+                            Status  = "Failed"
+                        })
+                }
+            }
+            Write-Log "[DEBUG] VS Code Extensions section complete. Total packages in list: $($r.Packages.Count)"
+            if ($r.Counts.Fail -gt 0) { $r.Status = "FAIL"; $r.ExitCode = 1 }
+        }))
 
 # 7) DOCKER
 $Results.Add((Invoke-Step -Name "Docker Images" -Skip:$SkipDocker -Body {
-    param($r)
-    if (-not (Test-CommandExists "docker")) { $r.Status="SKIP"; $r.Notes.Add("docker brak w PATH."); return }
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] docker pull ..."); return }
+            param($r)
+            if (-not (Test-CommandExists "docker")) { $r.Status = "SKIP"; $r.Notes.Add("docker brak w PATH."); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] docker pull ..."); return }
 
-    $outInfo = @()
-    $ecInfo = Try-Run -Body { docker info } -OutputLines ([ref]$outInfo)
-    if ($ecInfo -ne 0) {
-        $r.Status = "SKIP"
-        $r.Notes.Add("Docker daemon nie działa — pomijam (docker info exitCode=$ecInfo).")
-        return
-    }
+            $outInfo = @()
+            $ecInfo = Try-Run -Body { docker info } -OutputLines ([ref]$outInfo)
+            if ($ecInfo -ne 0) {
+                $r.Status = "SKIP"
+                $r.Notes.Add("Docker daemon nie działa — pomijam (docker info exitCode=$ecInfo).")
+                return
+            }
 
-    $images = @()
+            $images = @()
 
-    if ($DockerImagesToUpdate.Count -gt 0) {
-        $images = @($DockerImagesToUpdate)
-    } else {
-        $outList = @()
-        $ecList  = Try-Run -Body { docker image ls --format '{{.Repository}}:{{.Tag}}' } -OutputLines ([ref]$outList)
-        if ($ecList -ne 0) {
-            $r.Status = "SKIP"
-            $r.Notes.Add("Nie da się pobrać listy obrazów (docker image ls exitCode=$ecList) — pomijam.")
-            return
-        }
-        $images = @($outList)
-    }
+            if ($DockerImagesToUpdate.Count -gt 0) {
+                $images = @($DockerImagesToUpdate)
+            }
+            else {
+                $outList = @()
+                $ecList = Try-Run -Body { docker image ls --format '{{.Repository}}:{{.Tag}}' } -OutputLines ([ref]$outList)
+                if ($ecList -ne 0) {
+                    $r.Status = "SKIP"
+                    $r.Notes.Add("Nie da się pobrać listy obrazów (docker image ls exitCode=$ecList) — pomijam.")
+                    return
+                }
+                $images = @($outList)
+            }
 
-    $images = @(
-        $images |
-        Where-Object { $_ -and ($_ -is [string]) } |
-        ForEach-Object { $_.Trim() } |
-        Where-Object {
-            $_ -and $_ -ne "<none>:<none>" -and
-            ($_ -match '^[a-z0-9][a-z0-9._/\-]*:[a-z0-9][a-z0-9._\-]*$')
-        } |
-        Select-Object -Unique
-    )
+            $images = @(
+                $images |
+                Where-Object { $_ -and ($_ -is [string]) } |
+                ForEach-Object { $_.Trim() } |
+                Where-Object {
+                    $_ -and $_ -ne "<none>:<none>" -and
+                    ($_ -match '^[a-z0-9][a-z0-9._/\-]*:[a-z0-9][a-z0-9._\-]*$')
+                } |
+                Select-Object -Unique
+            )
 
-    if ($images.Count -eq 0) { $r.Notes.Add("Brak obrazów do aktualizacji (albo nie spełniają formatu repo:tag)."); return }
+            if ($images.Count -eq 0) { $r.Notes.Add("Brak obrazów do aktualizacji (albo nie spełniają formatu repo:tag)."); return }
 
-    $r.Counts.Installed = $images.Count
-    $r.Actions.Add("Images: $($images.Count)")
-    foreach ($img in $images) {
-        $r.Counts.Total++
-        $outPull = @()
-        $ecPull  = Try-Run -Body { docker pull $img } -OutputLines ([ref]$outPull)
-        $outPull | ForEach-Object { Write-Log $_ }
+            $r.Counts.Installed = $images.Count
+            $r.Actions.Add("Images: $($images.Count)")
+            foreach ($img in $images) {
+                $r.Counts.Total++
+                $outPull = @()
+                $ecPull = Try-Run -Body { docker pull $img } -OutputLines ([ref]$outPull)
+                $outPull | ForEach-Object { Write-Log $_ }
 
-        if ($ecPull -eq 0) { $r.Counts.Ok++ }
-        else {
-            $r.Counts.Fail++
-            $r.Failures.Add("docker pull FAIL: $img (exitCode=$ecPull)")
-        }
-    }
+                if ($ecPull -eq 0) { $r.Counts.Ok++ }
+                else {
+                    $r.Counts.Fail++
+                    $r.Failures.Add("docker pull FAIL: $img (exitCode=$ecPull)")
+                }
+            }
 
-    if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
-}))
+            if ($r.Counts.Fail -gt 0) { $r.Status = "FAIL"; $r.ExitCode = 1 }
+        }))
 
 # 8) GIT
 $Results.Add((Invoke-Step -Name "Git Repos" -Skip:$SkipGit -Body {
-    param($r)
-    if (-not (Test-CommandExists "git")) { $r.Status="SKIP"; $r.Notes.Add("git brak w PATH."); return }
+            param($r)
+            if (-not (Test-CommandExists "git")) { $r.Status = "SKIP"; $r.Notes.Add("git brak w PATH."); return }
 
-    $repos = @()
-    if ($GitRepos.Count -gt 0) { $repos += @($GitRepos) }
+            $repos = @()
+            if ($GitRepos.Count -gt 0) { $repos += @($GitRepos) }
 
-    foreach ($root in $GitRootPaths) {
-        if (-not (Test-Path $root)) {
-            Write-Log "Git root '$root' nie istnieje – pomijam." "WARN"
-            continue
-        }
-        try {
-            $found = Get-ChildItem -Path $root -Directory -Recurse -Depth 4 -ErrorAction SilentlyContinue |
-                Where-Object { Test-Path (Join-Path $_.FullName ".git") } |
-                ForEach-Object { $_.FullName }
-            $repos += @($found)
-        } catch {}
-    }
+            foreach ($root in $GitRootPaths) {
+                if (-not (Test-Path $root)) {
+                    Write-Log "Git root '$root' nie istnieje – pomijam." "WARN"
+                    continue
+                }
+                try {
+                    $found = Get-ChildItem -Path $root -Directory -Recurse -Depth 4 -ErrorAction SilentlyContinue |
+                    Where-Object { Test-Path (Join-Path $_.FullName ".git") } |
+                    ForEach-Object { $_.FullName }
+                    $repos += @($found)
+                }
+                catch {}
+            }
 
-    $repos = @($repos | Select-Object -Unique)
-    if ($repos.Count -eq 0) { $r.Status="SKIP"; $r.Notes.Add("Nie znaleziono repozytoriów."); return }
+            $repos = @($repos | Select-Object -Unique)
+            if ($repos.Count -eq 0) { $r.Status = "SKIP"; $r.Notes.Add("Nie znaleziono repozytoriów."); return }
 
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] git pull (repos: $($repos.Count))"); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] git pull (repos: $($repos.Count))"); return }
 
-    $r.Counts.Installed = $repos.Count
-    $r.Actions.Add("Repos: $($repos.Count)")
-    # Note: We don't check which repos have updates before pulling, so Available stays 0
+            $r.Counts.Installed = $repos.Count
+            $r.Actions.Add("Repos: $($repos.Count)")
+            # Note: We don't check which repos have updates before pulling, so Available stays 0
 
-    foreach ($repo in $repos) {
-        $r.Counts.Total++
-        Push-Location $repo
-        try {
-            Write-Log "git pull ($repo)"
-            $outPull = @()
-            $ecPull = Try-Run -Body { git pull } -OutputLines ([ref]$outPull)
-            $outPull | ForEach-Object { Write-Log $_ }
-            if ($ecPull -eq 0) { $r.Counts.Ok++; $r.Counts.Updated++ }
-            else { $r.Counts.Fail++; $r.Counts.Failed++; $r.Failures.Add("git pull FAIL: $repo (exitCode=$ecPull)") }
-        } finally {
-            Pop-Location
-        }
-    }
-    if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
-}))
+            foreach ($repo in $repos) {
+                if ($GitIgnorePaths -contains $repo) {
+                    Write-Host "[$Name] " -NoNewline -ForegroundColor Green
+                    Write-Host "⊘ SKIP $repo (ignorowany)" -ForegroundColor Yellow
+                    $r.Counts.Skipped++
+                    continue
+                }
+
+                $r.Counts.Total++
+                Push-Location $repo
+                try {
+                    Write-Log "git pull ($repo)"
+                    $outPull = @()
+                    $ecPull = Try-Run -Body { git pull } -OutputLines ([ref]$outPull)
+                    $outPull | ForEach-Object { Write-Log $_ }
+                    if ($ecPull -eq 0) { $r.Counts.Ok++; $r.Counts.Updated++ }
+                    else {
+                        $r.Counts.Fail++; $r.Counts.Failed++;
+                        $r.Failures.Add("git pull FAIL: $repo (exitCode=$ecPull)")
+                        Write-Host "    ✗ $repo - błąd (exitCode=$ecPull)" -ForegroundColor Red
+                    }
+                }
+                finally {
+                    Pop-Location
+                }
+            }
+            if ($r.Counts.Fail -gt 0) { $r.Status = "FAIL"; $r.ExitCode = 1 }
+        }))
 
 # 9) WSL
 $Results.Add((Invoke-Step -Name "WSL" -Skip:$SkipWSL -Body {
-    param($r)
-    if (-not (Test-CommandExists "wsl")) { $r.Status="SKIP"; $r.Notes.Add("wsl brak."); return }
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] wsl --update"); return }
+            param($r)
+            if (-not (Test-CommandExists "wsl")) { $r.Status = "SKIP"; $r.Notes.Add("wsl brak."); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] wsl --update"); return }
 
-    Write-Log "wsl --update..."
-    $out = @()
-    $ec  = Try-Run -Body { wsl --update } -OutputLines ([ref]$out)
-    $out | ForEach-Object { Write-Log $_ }
-    $r.ExitCode = $ec
-    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("wsl --update exitCode=$ec") }
-}))
+            Write-Log "wsl --update..."
+            $out = @()
+            $ec = Try-Run -Body { wsl --update } -OutputLines ([ref]$out)
+            $out | ForEach-Object { Write-Log $_ }
+            $r.ExitCode = $ec
+            if ($ec -ne 0) { $r.Status = "FAIL"; $r.ExitCode = 1; $r.Failures.Add("wsl --update exitCode=$ec") }
+        }))
 
 # 10) SCOOP
 $Results.Add((Invoke-Step -Name "Scoop" -Skip:$SkipScoop -Body {
-    param($r)
-    if (-not (Test-CommandExists "scoop")) { $r.Status="SKIP"; $r.Notes.Add("scoop brak w PATH."); return }
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] scoop update *"); return }
+            param($r)
+            if (-not (Test-CommandExists "scoop")) { $r.Status = "SKIP"; $r.Notes.Add("scoop brak w PATH."); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] scoop update *"); return }
 
-    Write-Log "scoop update..."
-    $out = @()
-    $ec = Try-Run -Body { scoop update } -OutputLines ([ref]$out)
-    $out | ForEach-Object { Write-Log $_ }
+            Write-Log "scoop update..."
+            $out = @()
+            $ec = Try-Run -Body { scoop update } -OutputLines ([ref]$out)
+            $out | ForEach-Object { Write-Log $_ }
 
-    Write-Log "scoop update *..."
-    $out2 = @()
-    $ec2 = Try-Run -Body { scoop update * } -OutputLines ([ref]$out2)
-    $out2 | ForEach-Object { Write-Log $_ }
+            Write-Log "scoop update *..."
+            $out2 = @()
+            $ec2 = Try-Run -Body { scoop update * } -OutputLines ([ref]$out2)
+            $out2 | ForEach-Object { Write-Log $_ }
 
-    $r.ExitCode = if ($ec -ne 0) { $ec } else { $ec2 }
-    if ($r.ExitCode -ne 0) { $r.Status="FAIL"; $r.Failures.Add("scoop update exitCode=$($r.ExitCode)") }
-}))
+            $r.ExitCode = if ($ec -ne 0) { $ec } else { $ec2 }
+            if ($r.ExitCode -ne 0) { $r.Status = "FAIL"; $r.Failures.Add("scoop update exitCode=$($r.ExitCode)") }
+        }))
 
 # 11) PIPX
 $Results.Add((Invoke-Step -Name "pipx" -Skip:$SkipPipx -Body {
-    param($r)
-    if (-not (Test-CommandExists "pipx")) { $r.Status="SKIP"; $r.Notes.Add("pipx brak w PATH."); return }
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] pipx upgrade-all"); return }
+            param($r)
+            if (-not (Test-CommandExists "pipx")) { $r.Status = "SKIP"; $r.Notes.Add("pipx brak w PATH."); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] pipx upgrade-all"); return }
 
-    Write-Log "pipx upgrade-all..."
-    $out = @()
-    $ec = Try-Run -Body { pipx upgrade-all } -OutputLines ([ref]$out)
-    $out | ForEach-Object { Write-Log $_ }
-    $r.ExitCode = $ec
-    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("pipx upgrade-all exitCode=$ec") }
-}))
+            Write-Log "pipx upgrade-all..."
+            $out = @()
+            $ec = Try-Run -Body { pipx upgrade-all } -OutputLines ([ref]$out)
+            $out | ForEach-Object { Write-Log $_ }
+            $r.ExitCode = $ec
+            if ($ec -ne 0) { $r.Status = "FAIL"; $r.ExitCode = 1; $r.Failures.Add("pipx upgrade-all exitCode=$ec") }
+        }))
 
 # 12) CARGO (Rust)
 $Results.Add((Invoke-Step -Name "Cargo (Rust)" -Skip:$SkipCargo -Body {
-    param($r)
-    if (-not (Test-CommandExists "cargo")) { $r.Status="SKIP"; $r.Notes.Add("cargo brak w PATH."); return }
+            param($r)
+            if (-not (Test-CommandExists "cargo")) { $r.Status = "SKIP"; $r.Notes.Add("cargo brak w PATH."); return }
 
-    # Check if cargo-update is installed
-    $hasCargoUpdate = $false
-    try {
-        $checkOut = @((cargo install --list) 2>&1)
-        if ($checkOut -match 'cargo-update') { $hasCargoUpdate = $true }
-    } catch {}
+            # Check if cargo-update is installed
+            $hasCargoUpdate = $false
+            try {
+                $checkOut = @((cargo install --list) 2>&1)
+                if ($checkOut -match 'cargo-update') { $hasCargoUpdate = $true }
+            }
+            catch {}
 
-    if (-not $hasCargoUpdate) {
-        $r.Status="SKIP"
-        $r.Notes.Add("cargo-update nie jest zainstalowany. Zainstaluj: cargo install cargo-update")
-        return
-    }
+            if (-not $hasCargoUpdate) {
+                $r.Status = "SKIP"
+                $r.Notes.Add("cargo-update nie jest zainstalowany. Zainstaluj: cargo install cargo-update")
+                return
+            }
 
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] cargo install-update -a"); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] cargo install-update -a"); return }
 
-    Write-Log "cargo install-update -a..."
-    $out = @()
-    $ec = Try-Run -Body { cargo install-update -a } -OutputLines ([ref]$out)
-    $out | ForEach-Object { Write-Log $_ }
-    $r.ExitCode = $ec
-    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("cargo install-update exitCode=$ec") }
-}))
+            Write-Log "cargo install-update -a..."
+            $out = @()
+            $ec = Try-Run -Body { cargo install-update -a } -OutputLines ([ref]$out)
+            $out | ForEach-Object { Write-Log $_ }
+            $r.ExitCode = $ec
+            if ($ec -ne 0) { $r.Status = "FAIL"; $r.ExitCode = 1; $r.Failures.Add("cargo install-update exitCode=$ec") }
+        }))
 
 # 13) GO TOOLS
 $Results.Add((Invoke-Step -Name "Go Tools" -Skip:$SkipGo -Body {
-    param($r)
-    if (-not (Test-CommandExists "go")) { $r.Status="SKIP"; $r.Notes.Add("go brak w PATH."); return }
+            param($r)
+            if (-not (Test-CommandExists "go")) { $r.Status = "SKIP"; $r.Notes.Add("go brak w PATH."); return }
 
-    if ($GoTools.Count -eq 0) {
-        $r.Status="SKIP"
-        $r.Notes.Add("Brak skonfigurowanych narzędzi Go (zmienna `$GoTools pusta).")
-        return
-    }
+            if ($GoTools.Count -eq 0) {
+                $r.Status = "SKIP"
+                $r.Notes.Add("Brak skonfigurowanych narzędzi Go (zmienna `$GoTools pusta).")
+                return
+            }
 
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] go install dla $($GoTools.Count) narzędzi"); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] go install dla $($GoTools.Count) narzędzi"); return }
 
-    $r.Actions.Add("Go tools: $($GoTools.Count)")
-    foreach ($tool in $GoTools) {
-        $r.Counts.Total++
-        try {
-            Write-Log "go install $tool"
-            @((go install $tool) 2>&1) | ForEach-Object { Write-Log $_ }
-            if ($LASTEXITCODE -eq 0) { $r.Counts.Ok++ }
-            else { $r.Counts.Fail++; $r.Failures.Add("go install FAIL: $tool (exitCode=$LASTEXITCODE)") }
-        } catch {
-            $r.Counts.Fail++
-            $r.Failures.Add("go install FAIL: $tool :: $($_.Exception.Message)")
-        }
-    }
-    if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
-}))
+            $r.Actions.Add("Go tools: $($GoTools.Count)")
+            foreach ($tool in $GoTools) {
+                $r.Counts.Total++
+                try {
+                    Write-Log "go install $tool"
+                    @((go install $tool) 2>&1) | ForEach-Object { Write-Log $_ }
+                    if ($LASTEXITCODE -eq 0) { $r.Counts.Ok++ }
+                    else { $r.Counts.Fail++; $r.Failures.Add("go install FAIL: $tool (exitCode=$LASTEXITCODE)") }
+                }
+                catch {
+                    $r.Counts.Fail++
+                    $r.Failures.Add("go install FAIL: $tool :: $($_.Exception.Message)")
+                }
+            }
+            if ($r.Counts.Fail -gt 0) { $r.Status = "FAIL"; $r.ExitCode = 1 }
+        }))
 
 # 14) RUBY GEMS
 $Results.Add((Invoke-Step -Name "Ruby Gems" -Skip:$SkipRuby -Body {
-    param($r)
-    if (-not (Test-CommandExists "gem")) { $r.Status="SKIP"; $r.Notes.Add("gem brak w PATH."); return }
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] gem update --system && gem update"); return }
+            param($r)
+            if (-not (Test-CommandExists "gem")) { $r.Status = "SKIP"; $r.Notes.Add("gem brak w PATH."); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] gem update --system && gem update"); return }
 
-    Write-Log "gem update --system..."
-    $out = @()
-    $ec = Try-Run -Body { gem update --system } -OutputLines ([ref]$out)
-    $out | ForEach-Object { Write-Log $_ }
+            Write-Log "gem update --system..."
+            $out = @()
+            $ec = Try-Run -Body { gem update --system } -OutputLines ([ref]$out)
+            $out | ForEach-Object { Write-Log $_ }
 
-    Write-Log "gem update..."
-    $out2 = @()
-    $ec2 = Try-Run -Body { gem update } -OutputLines ([ref]$out2)
-    $out2 | ForEach-Object { Write-Log $_ }
+            Write-Log "gem update..."
+            $out2 = @()
+            $ec2 = Try-Run -Body { gem update } -OutputLines ([ref]$out2)
+            $out2 | ForEach-Object { Write-Log $_ }
 
-    $r.ExitCode = if ($ec -ne 0) { $ec } else { $ec2 }
-    if ($r.ExitCode -ne 0) { $r.Status="FAIL"; $r.Failures.Add("gem update exitCode=$($r.ExitCode)") }
-}))
+            $r.ExitCode = if ($ec -ne 0) { $ec } else { $ec2 }
+            if ($r.ExitCode -ne 0) { $r.Status = "FAIL"; $r.Failures.Add("gem update exitCode=$($r.ExitCode)") }
+        }))
 
 # 15) COMPOSER (PHP)
 $Results.Add((Invoke-Step -Name "Composer (PHP)" -Skip:$SkipComposer -Body {
-    param($r)
-    if (-not (Test-CommandExists "composer")) { $r.Status="SKIP"; $r.Notes.Add("composer brak w PATH."); return }
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] composer global update"); return }
+            param($r)
+            if (-not (Test-CommandExists "composer")) { $r.Status = "SKIP"; $r.Notes.Add("composer brak w PATH."); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] composer global update"); return }
 
-    Write-Log "composer global update..."
-    $out = @()
-    $ec = Try-Run -Body { composer global update } -OutputLines ([ref]$out)
-    $out | ForEach-Object { Write-Log $_ }
-    $r.ExitCode = $ec
-    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("composer global update exitCode=$ec") }
-}))
+            Write-Log "composer global update..."
+            $out = @()
+            $ec = Try-Run -Body { composer global update } -OutputLines ([ref]$out)
+            $out | ForEach-Object { Write-Log $_ }
+            $r.ExitCode = $ec
+            if ($ec -ne 0) { $r.Status = "FAIL"; $r.ExitCode = 1; $r.Failures.Add("composer global update exitCode=$ec") }
+        }))
 
 # 16) YARN
 $Results.Add((Invoke-Step -Name "Yarn (global)" -Skip:$SkipYarn -Body {
-    param($r)
-    if (-not (Test-CommandExists "yarn")) { $r.Status="SKIP"; $r.Notes.Add("yarn brak w PATH."); return }
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] yarn global upgrade"); return }
+            param($r)
+            if (-not (Test-CommandExists "yarn")) { $r.Status = "SKIP"; $r.Notes.Add("yarn brak w PATH."); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] yarn global upgrade"); return }
 
-    Write-Log "yarn global upgrade..."
-    $out = @()
-    $ec = Try-Run -Body { yarn global upgrade } -OutputLines ([ref]$out)
-    $out | ForEach-Object { Write-Log $_ }
-    $r.ExitCode = $ec
-    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("yarn global upgrade exitCode=$ec") }
-}))
+            Write-Log "yarn global upgrade..."
+            $out = @()
+            $ec = Try-Run -Body { yarn global upgrade } -OutputLines ([ref]$out)
+            $out | ForEach-Object { Write-Log $_ }
+            $r.ExitCode = $ec
+            if ($ec -ne 0) { $r.Status = "FAIL"; $r.ExitCode = 1; $r.Failures.Add("yarn global upgrade exitCode=$ec") }
+        }))
 
 # 17) PNPM
 $Results.Add((Invoke-Step -Name "pnpm (global)" -Skip:$SkipPnpm -Body {
-    param($r)
-    if (-not (Test-CommandExists "pnpm")) { $r.Status="SKIP"; $r.Notes.Add("pnpm brak w PATH."); return }
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] pnpm update -g"); return }
+            param($r)
+            if (-not (Test-CommandExists "pnpm")) { $r.Status = "SKIP"; $r.Notes.Add("pnpm brak w PATH."); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] pnpm update -g"); return }
 
-    Write-Log "pnpm update -g..."
-    $out = @()
-    $ec = Try-Run -Body { pnpm update -g } -OutputLines ([ref]$out)
-    $out | ForEach-Object { Write-Log $_ }
-    $r.ExitCode = $ec
-    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("pnpm update -g exitCode=$ec") }
-}))
+            Write-Log "pnpm update -g..."
+            $out = @()
+            $ec = Try-Run -Body { pnpm update -g } -OutputLines ([ref]$out)
+            $out | ForEach-Object { Write-Log $_ }
+            $r.ExitCode = $ec
+            if ($ec -ne 0) { $r.Status = "FAIL"; $r.ExitCode = 1; $r.Failures.Add("pnpm update -g exitCode=$ec") }
+        }))
 
 # 18) MS STORE APPS
 $Results.Add((Invoke-Step -Name "MS Store Apps" -Skip:$SkipMSStore -Body {
-    param($r)
-    if (-not (Test-CommandExists "winget")) { $r.Status="SKIP"; $r.Notes.Add("winget brak w PATH."); return }
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] winget upgrade --source msstore"); return }
+            param($r)
+            if (-not (Test-CommandExists "winget")) { $r.Status = "SKIP"; $r.Notes.Add("winget brak w PATH."); return }
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] winget upgrade --source msstore"); return }
 
-    Write-Log "winget upgrade --source msstore..."
-    $args = @("upgrade", "--all", "--source", "msstore", "--accept-source-agreements", "--accept-package-agreements")
-    $out = @()
-    $ec = Try-Run -Body { winget @args } -OutputLines ([ref]$out)
-    $out | ForEach-Object { Write-Log $_ }
-    $r.ExitCode = $ec
-    if ($ec -ne 0) { $r.Status="FAIL"; $r.ExitCode=1; $r.Failures.Add("winget msstore exitCode=$ec") }
-}))
+            Write-Log "winget upgrade --source msstore..."
+            $args = @("upgrade", "--all", "--source", "msstore", "--accept-source-agreements", "--accept-package-agreements")
+            $out = @()
+            $ec = Try-Run -Body { winget @args } -OutputLines ([ref]$out)
+            $out | ForEach-Object { Write-Log $_ }
+            $r.ExitCode = $ec
+            if ($ec -ne 0) { $r.Status = "FAIL"; $r.ExitCode = 1; $r.Failures.Add("winget msstore exitCode=$ec") }
+        }))
 
 # 19) WSL DISTROS (apt/yum/pacman inside)
 $Results.Add((Invoke-Step -Name "WSL Distros (apt/yum/pacman)" -Skip:$SkipWSLDistros -Body {
-    param($r)
-    if (-not (Test-CommandExists "wsl")) { $r.Status="SKIP"; $r.Notes.Add("wsl brak."); return }
+            param($r)
+            if (-not (Test-CommandExists "wsl")) { $r.Status = "SKIP"; $r.Notes.Add("wsl brak."); return }
 
-    $distros = @()
-    if ($WSLDistros.Count -gt 0) {
-        $distros = @($WSLDistros)
-    } else {
-        # Auto-detect running/available distros
-        try {
-            Write-Host "  Wykrywam dystrybucje WSL..." -ForegroundColor Gray
-            $wslList = @((wsl -l -q) 2>&1 | Where-Object { $_ -and $_ -notmatch '^\s*$' })
-            foreach ($d in $wslList) {
-                $clean = $d.Trim() -replace '\x00',''
-                if ($clean) { $distros += $clean }
+            $distros = @()
+            if ($WSLDistros.Count -gt 0) {
+                $distros = @($WSLDistros)
             }
-        } catch {
-            Write-Log "Nie można pobrać listy dystrybucji WSL: $($_.Exception.Message)" "WARN"
-        }
-    }
-
-    if ($distros.Count -eq 0) { $r.Status="SKIP"; $r.Notes.Add("Brak dystrybucji WSL."); return }
-
-    Write-Host "  Znaleziono: $($distros.Count) dystrybucji WSL" -ForegroundColor Cyan
-    Write-Host "  Dystrybucje: " -NoNewline -ForegroundColor Gray
-    Write-Host ($distros -join ", ") -ForegroundColor Yellow
-    Write-Host ""
-
-    # Ask user if they want to update (requires sudo password)
-    Write-Host "  UWAGA: Aktualizacja dystrybucji WSL wymaga hasła sudo!" -ForegroundColor Yellow
-    Write-Host "  Będziesz musiał podać hasło dla każdej dystrybucji podczas aktualizacji." -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  Czy chcesz kontynuować aktualizację WSL distros? [T/n]: " -NoNewline -ForegroundColor Cyan
-
-    $userInput = Read-Host
-    $shouldUpdate = $true
-
-    if ($userInput -match '^[nN]') {
-        $shouldUpdate = $false
-    } elseif ([string]::IsNullOrWhiteSpace($userInput)) {
-        # Default to Yes (just pressed Enter)
-        $shouldUpdate = $true
-    } elseif ($userInput -match '^[tTyY]') {
-        $shouldUpdate = $true
-    }
-
-    if (-not $shouldUpdate) {
-        $r.Status = "SKIP"
-        $r.Notes.Add("Pominięto na życzenie użytkownika (wymaga hasła sudo).")
-        Write-Host "  Pomijam aktualizację WSL distros" -ForegroundColor Yellow
-        return
-    }
-
-    Write-Host "  Rozpoczynam aktualizację dystrybucji WSL..." -ForegroundColor Green
-    Write-Host ""
-
-    if ($WhatIf) { $r.Actions.Add("[WHATIF] aktualizacja $($distros.Count) dystrybucji WSL"); return }
-
-    $r.Counts.Installed = $distros.Count
-    $r.Actions.Add("WSL distros: $($distros.Count)")
-    # Note: We don't check which distros have updates before running apt/yum/pacman, so Available stays 0
-
-    foreach ($distro in $distros) {
-        $r.Counts.Total++
-
-        Write-Host "  Aktualizuję dystrybucję: " -NoNewline -ForegroundColor Gray
-        Write-Host $distro -ForegroundColor Cyan
-
-        $updated = $false
-
-        # Check if distro has apt (Debian/Ubuntu-based)
-        $hasApt = $false
-        try {
-            Write-Host "    Wykrywam menedżer pakietów..." -ForegroundColor DarkGray
-            $checkApt = @((wsl -d $distro -- which apt) 2>&1)
-            if ($LASTEXITCODE -eq 0) { $hasApt = $true }
-        } catch {}
-
-        if ($hasApt) {
-            try {
-                Write-Host "    Menedżer pakietów: " -NoNewline -ForegroundColor Gray
-                Write-Host "apt (Debian/Ubuntu)" -ForegroundColor Yellow
-                Write-Host "    Uruchamiam: apt update && apt upgrade -y" -ForegroundColor Gray
-                Write-Host "    (Podaj hasło sudo gdy zostaniesz poproszony)" -ForegroundColor DarkYellow
-
-                Write-Log "WSL ($distro): apt update && apt upgrade -y"
-                $cmd = "sudo apt update && sudo apt upgrade -y"
-                $outApt = @((wsl -d $distro -- bash -c $cmd) 2>&1)
-                $ecApt = $LASTEXITCODE
-                $outApt | ForEach-Object { Write-Log $_ }
-
-                if ($ecApt -eq 0) {
-                    $r.Counts.Ok++
-                    $r.Counts.Updated++
-                    Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
-                }
-                else {
-                    $r.Counts.Fail++
-                    $r.Counts.Failed++
-                    $r.Failures.Add("WSL apt FAIL: $distro (exitCode=$ecApt)")
-                    Write-Host "    ✗ $distro - błąd (exitCode=$ecApt)" -ForegroundColor Red
-                }
-                $updated = $true
-            } catch {
-                $r.Counts.Fail++
-                $r.Counts.Failed++
-                $r.Failures.Add("WSL apt FAIL: $distro :: $($_.Exception.Message)")
-                Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
-                $updated = $true
-            }
-        }
-
-        # Try yum (RHEL/CentOS/Fedora-based)
-        if (-not $updated) {
-            $hasYum = $false
-            try {
-                $checkYum = @((wsl -d $distro -- which yum) 2>&1)
-                if ($LASTEXITCODE -eq 0) { $hasYum = $true }
-            } catch {}
-
-            if ($hasYum) {
+            else {
+                # Auto-detect running/available distros
                 try {
-                    Write-Host "    Menedżer pakietów: " -NoNewline -ForegroundColor Gray
-                    Write-Host "yum (RHEL/CentOS/Fedora)" -ForegroundColor Yellow
-                    Write-Host "    Uruchamiam: yum update -y" -ForegroundColor Gray
-                    Write-Host "    (Podaj hasło sudo gdy zostaniesz poproszony)" -ForegroundColor DarkYellow
-
-                    Write-Log "WSL ($distro): yum update -y"
-                    $cmd = "sudo yum update -y"
-                    $outYum = @((wsl -d $distro -- bash -c $cmd) 2>&1)
-                    $ecYum = $LASTEXITCODE
-                    $outYum | ForEach-Object { Write-Log $_ }
-
-                    if ($ecYum -eq 0) {
-                        $r.Counts.Ok++
-                        $r.Counts.Updated++
-                        Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
+                    Write-Host "  Wykrywam dystrybucje WSL..." -ForegroundColor Gray
+                    $wslList = @((wsl -l -q) 2>&1 | Where-Object { $_ -and $_ -notmatch '^\s*$' })
+                    foreach ($d in $wslList) {
+                        $clean = $d.Trim() -replace '\x00', ''
+                        if ($clean) { $distros += $clean }
                     }
-                    else {
+                }
+                catch {
+                    Write-Log "Nie można pobrać listy dystrybucji WSL: $($_.Exception.Message)" "WARN"
+                }
+            }
+
+            if ($distros.Count -eq 0) { $r.Status = "SKIP"; $r.Notes.Add("Brak dystrybucji WSL."); return }
+
+            Write-Host "  Znaleziono: $($distros.Count) dystrybucji WSL" -ForegroundColor Cyan
+            Write-Host "  Dystrybucje: " -NoNewline -ForegroundColor Gray
+            Write-Host ($distros -join ", ") -ForegroundColor Yellow
+            Write-Host ""
+
+            # Ask user if they want to update (requires sudo password)
+            Write-Host "  UWAGA: Aktualizacja dystrybucji WSL wymaga hasła sudo!" -ForegroundColor Yellow
+            Write-Host "  Będziesz musiał podać hasło dla każdej dystrybucji podczas aktualizacji." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "  Czy chcesz kontynuować aktualizację WSL distros? [T/n]: " -NoNewline -ForegroundColor Cyan
+
+            $userInput = Read-Host
+            $shouldUpdate = $true
+
+            if ($userInput -match '^[nN]') {
+                $shouldUpdate = $false
+            }
+            elseif ([string]::IsNullOrWhiteSpace($userInput)) {
+                # Default to Yes (just pressed Enter)
+                $shouldUpdate = $true
+            }
+            elseif ($userInput -match '^[tTyY]') {
+                $shouldUpdate = $true
+            }
+
+            if (-not $shouldUpdate) {
+                $r.Status = "SKIP"
+                $r.Notes.Add("Pominięto na życzenie użytkownika (wymaga hasła sudo).")
+                Write-Host "  Pomijam aktualizację WSL distros" -ForegroundColor Yellow
+                return
+            }
+
+            Write-Host "  Rozpoczynam aktualizację dystrybucji WSL..." -ForegroundColor Green
+            Write-Host ""
+
+            if ($WhatIf) { $r.Actions.Add("[WHATIF] aktualizacja $($distros.Count) dystrybucji WSL"); return }
+
+            $r.Counts.Installed = $distros.Count
+            $r.Actions.Add("WSL distros: $($distros.Count)")
+            # Note: We don't check which distros have updates before running apt/yum/pacman, so Available stays 0
+
+            foreach ($distro in $distros) {
+                $r.Counts.Total++
+
+                Write-Host "  Aktualizuję dystrybucję: " -NoNewline -ForegroundColor Gray
+                Write-Host $distro -ForegroundColor Cyan
+
+                $updated = $false
+
+                # Check if distro has apt (Debian/Ubuntu-based)
+                $hasApt = $false
+                try {
+                    Write-Host "    Wykrywam menedżer pakietów..." -ForegroundColor DarkGray
+                    $checkApt = @((wsl -d $distro -- which apt) 2>&1)
+                    if ($LASTEXITCODE -eq 0) { $hasApt = $true }
+                }
+                catch {}
+
+                if ($hasApt) {
+                    try {
+                        Write-Host "    Menedżer pakietów: " -NoNewline -ForegroundColor Gray
+                        Write-Host "apt (Debian/Ubuntu)" -ForegroundColor Yellow
+                        Write-Host "    Uruchamiam: apt update && apt upgrade -y" -ForegroundColor Gray
+                        Write-Host "    (Podaj hasło sudo gdy zostaniesz poproszony)" -ForegroundColor DarkYellow
+
+                        Write-Log "WSL ($distro): apt update && apt upgrade -y"
+                        Write-Log "WSL ($distro): apt update && apt upgrade -y"
+                        $cmd = "sudo apt update && sudo apt upgrade -y"
+                        
+
+                        # Use Start-Process with single-string ArgumentList to ensure proper quoting for wsl/bash
+                        # We must quote the bash command string manually: "sudo ... "
+                        $proc = Start-Process "wsl" -ArgumentList "-d $distro -- bash -c ""$cmd""" -NoNewWindow -Wait -PassThru
+                        $ecApt = $proc.ExitCode
+
+
+                        if ($ecApt -eq 0) {
+                            $r.Counts.Ok++
+                            $r.Counts.Updated++
+                            Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
+                        }
+                        else {
+                            $r.Counts.Fail++
+                            $r.Counts.Failed++
+                            $r.Failures.Add("WSL apt FAIL: $distro (exitCode=$ecApt)")
+                            Write-Host "    ✗ $distro - błąd (exitCode=$ecApt)" -ForegroundColor Red
+                        }
+                        $updated = $true
+                    }
+                    catch {
                         $r.Counts.Fail++
                         $r.Counts.Failed++
-                        $r.Failures.Add("WSL yum FAIL: $distro (exitCode=$ecYum)")
-                        Write-Host "    ✗ $distro - błąd (exitCode=$ecYum)" -ForegroundColor Red
+                        $r.Failures.Add("WSL apt FAIL: $distro :: $($_.Exception.Message)")
+                        Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
+                        $updated = $true
                     }
-                    $updated = $true
-                } catch {
-                    $r.Counts.Fail++
-                    $r.Counts.Failed++
-                    $r.Failures.Add("WSL yum FAIL: $distro :: $($_.Exception.Message)")
-                    Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
-                    $updated = $true
+                }
+
+                # Try yum (RHEL/CentOS/Fedora-based)
+                if (-not $updated) {
+                    $hasYum = $false
+                    try {
+                        $checkYum = @((wsl -d $distro -- which yum) 2>&1)
+                        if ($LASTEXITCODE -eq 0) { $hasYum = $true }
+                    }
+                    catch {}
+
+                    if ($hasYum) {
+                        try {
+                            Write-Host "    Menedżer pakietów: " -NoNewline -ForegroundColor Gray
+                            Write-Host "yum (RHEL/CentOS/Fedora)" -ForegroundColor Yellow
+                            Write-Host "    Uruchamiam: yum update -y" -ForegroundColor Gray
+                            Write-Host "    (Podaj hasło sudo gdy zostaniesz poproszony)" -ForegroundColor DarkYellow
+
+                            Write-Log "WSL ($distro): yum update -y"
+                            Write-Log "WSL ($distro): yum update -y"
+                            $cmd = "sudo yum update -y"
+                            
+                            $proc = Start-Process "wsl" -ArgumentList "-d", $distro, "--", "bash", "-c", $cmd -NoNewWindow -Wait -PassThru
+                            $ecYum = $proc.ExitCode
+
+
+                            if ($ecYum -eq 0) {
+                                $r.Counts.Ok++
+                                $r.Counts.Updated++
+                                Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
+                            }
+                            else {
+                                $r.Counts.Fail++
+                                $r.Counts.Failed++
+                                $r.Failures.Add("WSL yum FAIL: $distro (exitCode=$ecYum)")
+                                Write-Host "    ✗ $distro - błąd (exitCode=$ecYum)" -ForegroundColor Red
+                            }
+                            $updated = $true
+                        }
+                        catch {
+                            $r.Counts.Fail++
+                            $r.Counts.Failed++
+                            $r.Failures.Add("WSL yum FAIL: $distro :: $($_.Exception.Message)")
+                            Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
+                            $updated = $true
+                        }
+                    }
+                }
+
+                # Try pacman (Arch Linux-based)
+                if (-not $updated) {
+                    $hasPacman = $false
+                    try {
+                        $checkPacman = @((wsl -d $distro -- which pacman) 2>&1)
+                        if ($LASTEXITCODE -eq 0) { $hasPacman = $true }
+                    }
+                    catch {}
+
+                    if ($hasPacman) {
+                        try {
+                            Write-Host "    Menedżer pakietów: " -NoNewline -ForegroundColor Gray
+                            Write-Host "pacman (Arch Linux)" -ForegroundColor Yellow
+                            Write-Host "    Uruchamiam: pacman -Syu --noconfirm" -ForegroundColor Gray
+                            Write-Host "    (Podaj hasło sudo gdy zostaniesz poproszony)" -ForegroundColor DarkYellow
+
+                            Write-Log "WSL ($distro): pacman -Syu --noconfirm"
+                            Write-Log "WSL ($distro): pacman -Syu --noconfirm"
+                            $cmd = "sudo pacman -Syu --noconfirm"
+                            
+                            $proc = Start-Process "wsl" -ArgumentList "-d", $distro, "--", "bash", "-c", $cmd -NoNewWindow -Wait -PassThru
+                            $ecPacman = $proc.ExitCode
+
+
+                            if ($ecPacman -eq 0) {
+                                $r.Counts.Ok++
+                                $r.Counts.Updated++
+                                Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
+                            }
+                            else {
+                                $r.Counts.Fail++
+                                $r.Counts.Failed++
+                                $r.Failures.Add("WSL pacman FAIL: $distro (exitCode=$ecPacman)")
+                                Write-Host "    ✗ $distro - błąd (exitCode=$ecPacman)" -ForegroundColor Red
+                            }
+                            $updated = $true
+                        }
+                        catch {
+                            $r.Counts.Fail++
+                            $r.Counts.Failed++
+                            $r.Failures.Add("WSL pacman FAIL: $distro :: $($_.Exception.Message)")
+                            Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
+                            $updated = $true
+                        }
+                    }
+                }
+
+                if (-not $updated) {
+                    $r.Notes.Add("WSL: $distro - brak apt/yum/pacman, pomijam")
+                    Write-Log "WSL: $distro - brak apt/yum/pacman, pomijam" "WARN"
+                    Write-Host "    ⊘ $distro - brak obsługiwanego menedżera pakietów (apt/yum/pacman)" -ForegroundColor Yellow
                 }
             }
-        }
 
-        # Try pacman (Arch Linux-based)
-        if (-not $updated) {
-            $hasPacman = $false
-            try {
-                $checkPacman = @((wsl -d $distro -- which pacman) 2>&1)
-                if ($LASTEXITCODE -eq 0) { $hasPacman = $true }
-            } catch {}
-
-            if ($hasPacman) {
-                try {
-                    Write-Host "    Menedżer pakietów: " -NoNewline -ForegroundColor Gray
-                    Write-Host "pacman (Arch Linux)" -ForegroundColor Yellow
-                    Write-Host "    Uruchamiam: pacman -Syu --noconfirm" -ForegroundColor Gray
-                    Write-Host "    (Podaj hasło sudo gdy zostaniesz poproszony)" -ForegroundColor DarkYellow
-
-                    Write-Log "WSL ($distro): pacman -Syu --noconfirm"
-                    $cmd = "sudo pacman -Syu --noconfirm"
-                    $outPacman = @((wsl -d $distro -- bash -c $cmd) 2>&1)
-                    $ecPacman = $LASTEXITCODE
-                    $outPacman | ForEach-Object { Write-Log $_ }
-
-                    if ($ecPacman -eq 0) {
-                        $r.Counts.Ok++
-                        $r.Counts.Updated++
-                        Write-Host "    ✓ $distro zaktualizowano" -ForegroundColor Green
-                    }
-                    else {
-                        $r.Counts.Fail++
-                        $r.Counts.Failed++
-                        $r.Failures.Add("WSL pacman FAIL: $distro (exitCode=$ecPacman)")
-                        Write-Host "    ✗ $distro - błąd (exitCode=$ecPacman)" -ForegroundColor Red
-                    }
-                    $updated = $true
-                } catch {
-                    $r.Counts.Fail++
-                    $r.Counts.Failed++
-                    $r.Failures.Add("WSL pacman FAIL: $distro :: $($_.Exception.Message)")
-                    Write-Host "    ✗ $distro - wyjątek: $($_.Exception.Message)" -ForegroundColor Red
-                    $updated = $true
-                }
-            }
-        }
-
-        if (-not $updated) {
-            $r.Notes.Add("WSL: $distro - brak apt/yum/pacman, pomijam")
-            Write-Log "WSL: $distro - brak apt/yum/pacman, pomijam" "WARN"
-            Write-Host "    ⊘ $distro - brak obsługiwanego menedżera pakietów (apt/yum/pacman)" -ForegroundColor Yellow
-        }
-    }
-
-    if ($r.Counts.Fail -gt 0) { $r.Status="FAIL"; $r.ExitCode=1 }
-}))
+            if ($r.Counts.Fail -gt 0) { $r.Status = "FAIL"; $r.ExitCode = 1 }
+        }))
 
 # ----------------- SUMMARY -----------------
 Write-Host ""
@@ -1655,7 +1735,8 @@ try {
     Write-Host "Tip: " -NoNewline -ForegroundColor DarkGray
     Write-Host "Szczegółowe listy pakietów znajdziesz w logach i summary JSON" -ForegroundColor DarkGray
     Write-Log "Summary JSON: $summaryJsonPath"
-} catch {
+}
+catch {
     Write-Log "Nie udało się zapisać summary JSON: $($_.Exception.Message)" "WARN"
     Write-Host "Pełny log: $script:logFile"
 }
