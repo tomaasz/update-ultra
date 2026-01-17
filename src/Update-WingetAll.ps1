@@ -855,8 +855,8 @@ $Results.Add((Invoke-Step -Name "Winget" -Skip:$SkipWinget -Body {
                 $isIgnored = $WingetIgnoreIds -contains $id
 
                 $status = "NoChange"
-                if ($before -and -not $after) { $status = "Updated" }
-                elseif ($before -and $after -and $before.Version -ne $after.Version) { $status = "Updated" }
+                if ($before -and -not $after) { $status = "Updated"; $r.Counts.Updated++ }
+                elseif ($before -and $after -and $before.Version -ne $after.Version) { $status = "Updated"; $r.Counts.Updated++ }
                 elseif ($isIgnored) { $status = "Skipped" }
 
                 $pkgName = $id
