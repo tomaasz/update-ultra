@@ -135,7 +135,10 @@ $DockerImagesToUpdate = @() # empty = update all local images
 
 $GitRepos = @()
 $GitRepos = @()
-$GitRootPaths = @("C:\Dev")
+$GitRootPaths = @(
+    "C:\Dev",
+    "C:\Users\tomaa\.pyenv"  # External repo (pyenv-win fork)
+)
 $GitIgnorePaths = @("C:\Dev\ocr-stare-dokumenty") # Repos to skip updates
 
 
