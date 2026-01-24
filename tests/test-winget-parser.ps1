@@ -52,8 +52,8 @@ foreach ($funcName in $functionsToTest) {
 
 # --- Tests ---
 
-$failed = 0
-$passed = 0
+$global:failed = 0
+$global:passed = 0
 
 function Assert-True ($condition, $msg) {
     if ($condition) {
