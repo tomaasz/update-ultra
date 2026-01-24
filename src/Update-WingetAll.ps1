@@ -1,29 +1,32 @@
 <#
-Update-WingetAll.ps1 — ULTRA v4.2
+Update-WingetAll.ps1 — ULTRA v5.2
 
-Nowe w v4.2:
-- FIX: Ignorowanie błędu git merge (workaround dla ocr-stare-dokumenty)
-- FIX: Poprawa widoczności monitu o hasło sudo w WSL (Start-Process)
-- FIX: Winget explicit targeting zaktualizowany (usunięcie zbędnego przecinka)
+Nowe w v5.2 (Etap 3 - Raportowanie):
+- HtmlReporter.psm1: Interaktywne raporty HTML z wykresami Chart.js
+- MetricsExporter.psm1: Export do InfluxDB, Prometheus, Custom HTTP
+- ComparisonEngine.psm1: Analiza trendów, wykrywanie anomalii (Z-score)
+- Parametry: -GenerateHtmlReport, -ExportMetrics, -CompareWithHistory
+- Historia zapisywana w %APPDATA%\update-ultra\history\
+- Linear regression dla wykrywania trendów (Increasing/Decreasing/Stable)
 
-Nowe w v4.1:
-- Rozszerzona tabela podsumowania z szczegółowymi statystykami
-- Nowe kolumny: Dostępne, Zaktualizowano, Pominięto, Błędy
-- Globalne podsumowanie na końcu (total available/updated/skipped/failed)
-- Interaktywne pytanie przed aktualizacją WSL distros (wymaga sudo)
-- Komunikaty postępu dla WSL distros podczas aktualizacji
+Nowe w v5.1 (Etap 2 - Scheduling & Delta):
+- TaskScheduler.psm1: Windows Task Scheduler integration (Daily/Weekly/Monthly)
+- DeltaUpdateManager.psm1: Smart delta updates (tylko zmienione pakiety, ~50% szybciej)
+- Parametry: -InstallSchedule, -DeltaMode, -RunAt, -Frequency
+- Scheduled tasks z warunkami (AC power, Network, Idle)
 
-Nowe w v4.0:
-- Naprawiono parser winget (nie wyciąga już linii postępu jako pakietów)
-- Dodano ignorowanie pakietów (Discord.Discord w $WingetIgnoreIds)
-- Dodano 10 nowych środowisk: Scoop, pipx, Cargo, Go, Ruby, Composer, Yarn, pnpm, MS Store, WSL Distros (apt/yum)
-- Wszystkie sekcje automatycznie wykrywają czy narzędzie jest zainstalowane (SKIP jeśli brak)
-- Skrypt jest uniwersalny - działa na różnych komputerach
+Nowe w v5.0 (Etap 1 - Core Features):
+- ParallelExecution.psm1: Równoległe wykonanie z ThreadJob
+- WingetCache.psm1: Cache'owanie (memory + disk, configurable TTL)
+- SnapshotManager.psm1: Snapshoty pakietów + rollback
+- NotificationManager.psm1: Toast/Email/Webhook notifications
+- Pre/Post-Update Hooks: 3-poziomowy system hooków
+- Optymalizacja parsera Winget: regex-based (30-50% szybszy)
 
-Naprawy vs v3.3:
-- FIX: Winget parser nie wyciąga już linii postępu (2%, 100%, MB, etc.) jako ID pakietów
-- FIX: Użycie regex do wykrywania prawdziwych ID pakietów (format Vendor.Product)
-- FIX: Unary comma w zwracanych tablicach aby uniknąć rozpakowania przez PowerShell
+Poprzednie wersje (v4.x):
+- v4.2: FIX git merge, WSL sudo visibility, winget targeting
+- v4.1: Rozszerzona tabela podsumowania, interaktywne WSL prompts
+- v4.0: 10 nowych środowisk (Scoop, pipx, Cargo, Go, Ruby, Composer, Yarn, pnpm, MS Store, WSL)
 
 #>
 
@@ -868,7 +871,7 @@ $script:logFile = Join-Path $LogDirectory "dev_update_$timestamp.log"
 # Display startup banner
 Write-Host ""
 Write-Host "╔════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║  UPDATE-ULTRA v5.0 - Uniwersalny Updater      ║" -ForegroundColor Cyan
+Write-Host "║  UPDATE-ULTRA v5.2 - Uniwersalny Updater      ║" -ForegroundColor Cyan
 Write-Host "╚════════════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Rozpoczynam aktualizację wszystkich środowisk..." -ForegroundColor White
@@ -2444,7 +2447,7 @@ if ($CompareWithHistory -and (Get-Module ComparisonEngine)) {
     }
 }
 
-Write-Log "===== END UPDATE (ULTRA v5.0) ====="
+Write-Log "===== END UPDATE (ULTRA v5.2) ====="
 
 $overallFail = $Results | Where-Object { $_.Status -eq "FAIL" }
 if ($overallFail) { exit 1 } else { exit 0 }
